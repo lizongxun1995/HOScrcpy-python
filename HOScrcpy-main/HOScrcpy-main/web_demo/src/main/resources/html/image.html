@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<title>Optimized Canvas</title>
+	<style>
+		body {
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #f0f0f0;
+        }
+        .canvas-container {
+            text-align: center;
+            background-color: white;
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        #ohImageCanvas {
+            cursor: pointer;
+            max-width: 100%;
+            height: auto;
+            display: block;
+            margin: 0 auto;
+        }
+	</style>
+</head>
+<body>
+<div class="canvas-container">
+	<canvas id="ohImageCanvas"></canvas>
+</div>
+</body>
+<script>
+	var socketUrl = "ws://127.0.0.1:8899/127.0.0.1/设备sn";
+    var flag = 0;
+    var ws = new WebSocket(socketUrl);
+    ws.binaryType = 'blob';
+
+    // 存储图片和显示相关参数
+    let imageParams = {
+        imgWidth: 0,
+        imgHeight: 0,
+        displayWidth: 0,
+        displayHeight: 0,
+        startX: 0,
+        startY: 0
+    };
+
+    ws.onopen = function() {
+        var txt = '{"type":"image", "message":""}'
+        ws.send(txt)
+    }
+
+    ws.onmessage = function(message) {
+        if (typeof message.data === 'string') {
+            var obj = JSON.parse(message.data);
+        } else if (message.data instanceof Blob){
+            doOhImage(message);
+        }
+    }
+
+    var ohImageCanvas = document.getElementById('ohImageCanvas');
+    var oh_graphics = ohImageCanvas.getContext('2d');
+
+    ohImageCanvas.addEventListener("mousedown", doMouseDown, false);
+    ohImageCanvas.addEventListener("mousemove", doMouseDrag, false);
+    ohImageCanvas.addEventListener("mouseup", doMouseUp, false);
+
+    const tempCanvas = document.createElement('canvas');
+    const tempCtx = tempCanvas.getContext('2d');
+
+    let isRendering = false;
+
+    var URL = window.URL || window.webkitURL;
+    var objectURL = null;
+    var img = new Image();
+    function doOhImage(message){
+        if(isRendering){
+            return;
+        }
+
+        isRendering = true;
+
+        const blob = new Blob([message.data], {type:'image/jpeg'});
+        const objectURL = URL.createObjectURL(blob);
+
+        img.onload = null;
+        img.onerror = null;
+        img.src = objectURL;
+
+        img.onload = function(){
+            try{
+                // 保存原始图片尺寸
+                imageParams.imgWidth = img.width;
+                imageParams.imgHeight = img.height;
+
+                // 计算显示尺寸以适应容器
+                const maxWidth = 1920; // 最大宽度
+                const maxHeight = 1080; // 最大高度
+
+                // 计算缩放比例，保持宽高比
+                const aspectRatio = img.width / img.height;
+                let displayWidth, displayHeight;
+
+                if (img.width > maxWidth || img.height > maxHeight) {
+                    if (maxWidth / maxHeight > aspectRatio) {
+                        displayHeight = Math.min(maxHeight, img.height);
+                        displayWidth = displayHeight * aspectRatio;
+                    } else {
+                        displayWidth = Math.min(maxWidth, img.width);
+                        displayHeight = displayWidth / aspectRatio;
+                    }
+                } else {
+                    // 如果图片比最大尺寸小，使用原始尺寸
+                    displayWidth = img.width;
+                    displayHeight = img.height;
+                }
+
+                // 设置canvas尺寸为实际显示尺寸
+                ohImageCanvas.width = displayWidth;
+                ohImageCanvas.height = displayHeight;
+                tempCanvas.width = displayWidth;
+                tempCanvas.height = displayHeight;
+
+                // 计算图片在canvas中的位置（居中）
+                imageParams.displayWidth = displayWidth;
+                imageParams.displayHeight = displayHeight;
+                imageParams.startX = 0;
+                imageParams.startY = 0;
+
+                // 绘制图片到临时画布
+                tempCtx.clearRect(0, 0, tempCanvas.width, tempCanvas.height);
+                tempCtx.drawImage(img, 0, 0, displayWidth, displayHeight);
+
+                // 将临时画布内容复制到主画布
+                oh_graphics.drawImage(tempCanvas, 0, 0);
+
+                // 清理资源
+                URL.revokeObjectURL(objectURL);
+            }catch(error){
+                console.error("渲染图片时发生错误", error);
+                URL.revokeObjectURL(objectURL);
+            }finally{
+                isRendering = false;
+            }
+        };
+
+        img.onerror = function(){
+            console.error("图片加载失败");
+            URL.revokeObjectURL(objectURL);
+            isRendering = false;
+        };
+    }
+
+    ws.onclose = function() {
+        console.log("WebSocket连接已关闭");
+    }
+    // 根据实际图片位置计算点击坐标
+    function getActualClickPoint(x, y) {
+        // 获取canvas元素的显示尺寸
+        const rect = ohImageCanvas.getBoundingClientRect();
+        const scaleX = ohImageCanvas.width / rect.width;
+        const scaleY = ohImageCanvas.height / rect.height;
+
+        // 将鼠标坐标转换为canvas坐标
+        const canvasX = (x - rect.left) * scaleX;
+        const canvasY = (y - rect.top) * scaleY;
+
+        // 检查是否在图片范围内
+        if (canvasX < 0 || canvasX > imageParams.displayWidth ||
+            canvasY < 0 || canvasY > imageParams.displayHeight) {
+            return null;
+        }
+
+        // 计算相对于原始图片的坐标
+        const actualX = Math.floor((canvasX / imageParams.displayWidth) * imageParams.imgWidth);
+        const actualY = Math.floor((canvasY / imageParams.displayHeight) * imageParams.imgHeight);
+
+        return {
+            actualX: actualX,
+            actualY: actualY
+        };
+    }
+
+    function doMouseDrag(event) {
+        if (flag !== 1) {
+            return;
+        }
+        var x = event.clientX;
+        var y = event.clientY;
+        var clickPoint = getActualClickPoint(x, y);
+        if (clickPoint === null) {
+            return;
+        }
+        var message = '{"event":"move", "x":' + clickPoint.actualX + ', "y":' + clickPoint.actualY + '}';
+        var txt = '{"type":"touchEvent", "message":' + message + '}'
+        ws.send(txt)
+    }
+
+    function doMouseDown(event) {
+        var x = event.clientX;
+        var y = event.clientY;
+        var clickPoint = getActualClickPoint(x, y);
+        if (clickPoint === null) {
+            return;
+        }
+        flag = 1;
+        var message = '{"event":"down", "x":' + clickPoint.actualX + ', "y":' + clickPoint.actualY + '}';
+        var txt = '{"type":"touchEvent", "message":' + message + '}'
+        ws.send(txt)
+    }
+
+    function doMouseUp(event) {
+        flag = 0;
+
+        var x = event.clientX;
+        var y = event.clientY;
+        var clickPoint = getActualClickPoint(x, y);
+        if (clickPoint === null) {
+            return;
+        }
+        var message = '{"event":"up", "x":' + clickPoint.actualX + ', "y":' + clickPoint.actualY + '}';
+        var txt = '{"type":"touchEvent", "message":' + message + '}'
+        ws.send(txt)
+    }
+
+    // 添加窗口大小改变时的处理
+    window.addEventListener('resize', function() {
+        // 重新调整canvas显示（如果需要）
+    });
+</script>
+</html>

@@ -1,0 +1,149 @@
+"""Native scrcpy stream via Java subprocess bridge.
+
+Launches StreamBridge.java as a subprocess for JPEG image streaming
+and touch command relay via stdin.
+"""
+
+import os
+import subprocess
+import struct
+import time
+import threading
+from hos_scrcpy.utils.logger import logger
+
+TAG = "NativeStream"
+_JAVA_EXE = "java.exe" if os.name == "nt" else "java"
+
+_BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _find_libs_dir():
+    """Find the HOScrcpy libs directory containing the JAR files.
+
+    Resolution order:
+    1. HOS_SCRCPY_HOME env var → $HOS_SCRCPY_HOME/HOScrcpy/libs
+    2. HOS_SCRCPY_LIBS env var → direct path to libs directory
+    3. Package-relative: hos_scrcpy/bridge/libs/
+    4. Current working directory fallback
+    """
+    home = os.environ.get("HOS_SCRCPY_HOME")
+    if home:
+        return os.path.join(home, "HOScrcpy", "libs")
+
+    libs = os.environ.get("HOS_SCRCPY_LIBS")
+    if libs:
+        return libs
+
+    pkg_libs = os.path.join(_BRIDGE_DIR, "libs")
+    if os.path.isdir(pkg_libs):
+        return pkg_libs
+
+    # Dev-mode relative path
+    dev_libs = os.path.abspath(os.path.join(
+        _BRIDGE_DIR, "..", "..", "HOScrcpy-main", "HOScrcpy", "libs"
+    ))
+    if os.path.isdir(dev_libs):
+        return dev_libs
+
+    return os.path.join(os.getcwd(), "libs")
+
+
+def _find_java():
+    """Find java executable. Searches common install locations."""
+    # 1. Explicit env var
+    java_home = os.environ.get("JAVA_HOME")
+    if java_home:
+        candidate = os.path.join(java_home, "bin", _JAVA_EXE)
+        if os.path.isfile(candidate):
+            return candidate
+
+    # 2. HOS_SCRCPY_JAVA env var
+    java_path = os.environ.get("HOS_SCRCPY_JAVA")
+    if java_path and os.path.isfile(java_path):
+        return java_path
+
+    # 3. PATH
+    import shutil
+    from_path = shutil.which("java")
+    if from_path:
+        return from_path
+
+    # 4. Windows common install dirs
+    if os.name == "nt":
+        import glob as _glob
+        search_roots = [
+            os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Microsoft"),
+            os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Eclipse Adoptium"),
+            os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Java"),
+            os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "Android\\openjdk"),
+        ]
+        for root in search_roots:
+            if os.path.isdir(root):
+                for pattern in ["jdk-*", "jre-*"]:
+                    for d in sorted(_glob.glob(os.path.join(root, pattern)), reverse=True):
+                        candidate = os.path.join(d, "bin", _JAVA_EXE)
+                        if os.path.isfile(candidate):
+                            return candidate
+
+    return "java"
+
+
+_LIBS_DIR = _find_libs_dir()
+
+
+def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710"):
+    """Launch Java StreamBridge for JPEG image streaming.
+
+    Returns (java_proc, java_proc) — the same process serves as both
+    the frame source (stdout) and touch sink (stdin).
+    Returns None if Java is unavailable.
+    """
+    from hos_scrcpy.core.hdc_client import _find_hdc
+    hdc_path = _find_hdc() or "hdc"
+    java_path = _find_java()
+    classpath = os.path.join(_LIBS_DIR, "*") + os.pathsep + _BRIDGE_DIR
+
+    java_cmd = [
+        java_path, "-cp", classpath, "StreamBridge", sn, ip, str(port), hdc_path,
+    ]
+
+    try:
+        java_proc = subprocess.Popen(
+            java_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=_BRIDGE_DIR,
+        )
+    except Exception as ex:
+        logger.error(f"{TAG}: failed to start java: {ex}")
+        return None
+
+    # Monitor java stderr
+    def _log_java():
+        for line in java_proc.stderr:
+            msg = line.decode("utf-8", errors="replace").strip()
+            if msg:
+                logger.info(f"{TAG}: JAVA {msg}")
+    threading.Thread(target=_log_java, daemon=True).start()
+
+    logger.info(f"{TAG}: Java image stream started for {sn}")
+    return (java_proc, java_proc)
+
+
+def read_jpeg_frames(proc: subprocess.Popen):
+    """Read length-prefixed JPEG frames from proc stdout."""
+    while proc.poll() is None:
+        try:
+            header = proc.stdout.read(4)
+            if len(header) < 4:
+                time.sleep(0.001)
+                continue
+            length = struct.unpack(">I", header)[0]
+            if length > 10_000_000 or length <= 0:
+                continue
+            data = proc.stdout.read(length)
+            if len(data) == length and len(data) > 1000:
+                yield data
+        except Exception:
+            break

@@ -1,0 +1,13 @@
+Manifest-Version: 1.0
+Main-Class: Main
+Class-Path: libdc1394-2.2.6-1.5.9.jar commons-lang3-3.12.0.jar videoinpu
+ t-0.200-1.5.9.jar ffmpeg-6.0-1.5.9.jar ffmpeg-6.0-1.5.9-macosx-x86_64.j
+ ar leptonica-1.83.0-1.5.9.jar librealsense2-2.53.1-1.5.9.jar libfreenec
+ t2-0.2.0-1.5.9.jar javacpp-1.5.9.jar opencv-4.7.0-1.5.9.jar flycapture-
+ 2.13.3.31-1.5.9.jar librealsense-1.12.4-1.5.9.jar jackson-core-2.15.2.j
+ ar jackson-annotations-2.15.2.jar ffmpeg-6.0-1.5.9-macosx-arm64.jar lib
+ freenect-0.5.7-1.5.9.jar flatlaf-3.6.jar javacv-1.5.9.jar openblas-0.3.
+ 23-1.5.9.jar tesseract-5.3.1-1.5.9.jar jackson-databind-2.15.2.jar hosS
+ crcpy-1.0.14-beta.jar artoolkitplus-2.3.1-1.5.9.jar ffmpeg-6.0-1.5.9-wi
+ ndows-x86_64.jar
+

@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8">
+		<title>Title</title>
+	</head>
+	<body>
+		<div>
+			<video autoplay style="cursor: pointer; width: 500px; height: 800px; text-align: center;"
+				id="player"></video>
+		</div>
+	</body>
+
+
+
+
+	<script type="text/javascript" src="jmuxer.min.js"></script>
+	<script>
+		var jmuxer = new JMuxer({
+			node: 'player',
+			mode: 'video',
+			flushingTime: 0,
+			fps: 60,
+			debug: false,
+			onError: function(data) {
+				jmuxer.reset();
+			}
+
+		});
+		var videoPlayer = document.getElementById("player");
+		var socketUrl = "ws://127.0.0.1:8899/127.0.0.1/设备sn";
+		var flag = 0;
+		var ws = new WebSocket(socketUrl);
+		ws.binaryType = 'arraybuffer';
+		ws.onopen = function() {
+			var txt = '{"type":"screen", "message":""}'
+			ws.send(txt)
+		}
+
+		videoPlayer.addEventListener("mousedown", doMouseDown, false);
+		videoPlayer.addEventListener("mousemove", doMouseDrag, false);
+		videoPlayer.addEventListener("mouseup", doMouseUp, false);
+
+
+		ws.onmessage = function(message) {
+			if (typeof message.data === 'string') {
+				var obj = JSON.parse(message.data);
+
+			} else if (message.data instanceof ArrayBuffer) {
+				jmuxer.feed({
+					video: new Uint8Array(message.data)
+				});
+			}
+		}
+
+		ws.onclose = function() {
+			console.log("close")
+		}
+
+
+		function getActualClickPoint(x, y) {
+			var videoHeight = videoPlayer.offsetHeight;
+			var videoWidth = videoPlayer.offsetWidth;
+			var streamHeight = videoPlayer.videoHeight;
+			var streamWidth = videoPlayer.videoWidth;
+			var aspectRadio = streamWidth / streamHeight;
+			var streamSizeWidth = Math.min(videoWidth, aspectRadio * videoHeight)
+			var streamSizeHeight = streamSizeWidth / aspectRadio;
+			var startX = 0.5 * (videoWidth - streamSizeWidth)
+			var startY = 0.5 * (videoHeight - streamSizeHeight);
+			if (x < startX) {
+				x = startX + 2;
+				y = startY + (streamSizeHeight / 2)
+			} else if (x > startX + streamSizeWidth) {
+				x = startX + streamSizeWidth - 2;
+				y = startY + (streamSizeHeight / 2)
+			} else if (y < startY) {
+				x = startX + (streamSizeWidth / 2);
+				y = startY + 2;
+			} else if (y > startY + streamSizeHeight) {
+				x = startX + (streamSizeWidth / 2);
+				y = startY + streamSizeHeight - 2;
+			}
+
+			var widthScaleRate = streamSizeWidth / streamWidth;
+			var heightScaleRate = streamSizeHeight / streamHeight;
+			var actualX = Math.floor((x - startX) / widthScaleRate);
+			var actualY = Math.floor((y - startY) / heightScaleRate)
+			return {
+				actualX: actualX,
+				actualY: actualY
+			};
+		}
+
+		function doMouseDrag(event) {
+			if (flag !== 1) {
+				return;
+			}
+			var x = event.offsetX;
+			var y = event.offsetY;
+			var clickPoint = getActualClickPoint(x, y);
+			if (clickPoint === null) {
+				return;
+			}
+			var message = '{"event":"move", "x":' + clickPoint.actualX + ', "y":' + clickPoint.actualY + '}';
+			var txt = '{"type":"touchEvent", "message":' + message + '}'
+			ws.send(txt)
+		}
+
+		function doMouseDown(event) {
+	
+			var x = event.offsetX;
+			var y = event.offsetY;
+			var clickPoint = getActualClickPoint(x, y);
+			if (clickPoint === null) {
+				return;
+			}
+			flag = 1;
+			var message = '{"event":"down", "x":' + clickPoint.actualX + ', "y":' + clickPoint.actualY + '}';
+			var txt = '{"type":"touchEvent", "message":' + message + '}'
+			ws.send(txt)
+		}
+
+		function doMouseUp(event) {
+			flag = 0;
+			
+			var x = event.offsetX;
+			var y = event.offsetY;
+			var clickPoint = getActualClickPoint(x, y);
+			if (clickPoint === null) {
+				return;
+			}
+			var message = '{"event":"up", "x":' + clickPoint.actualX + ', "y":' + clickPoint.actualY + '}';
+			var txt = '{"type":"touchEvent", "message":' + message + '}'
+			ws.send(txt)
+		}
+		
+	</script>
+</html>

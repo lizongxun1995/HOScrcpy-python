@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.omc/
+.claude/
+*.class
+.vscode/
+.idea/
+
+# Large binaries (not tracked in git)
+HOScrcpy-main/HOScrcpy/libs/
+HOScrcpy-main/HOScrcpy-v1.0.15-beta.tar.gz
+HOScrcpy-main/HOScrcpy.tgz
+HOScrcpy-main/hosScrcpy-1.0.15-beta.jar
+hos_scrcpy/toolchains/
+hos_scrcpy/bridge/scrcpy_server/
+hos_scrcpy/bridge/*.class
+
+# Token / credentials
+*.token
+.git-credentials

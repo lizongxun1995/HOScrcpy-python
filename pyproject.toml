@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hos-scrcpy"
+version = "0.1.0"
+description = "Python API for controlling HarmonyOS 6.0 devices — touch, mouse, keyboard, screen capture, UI dump"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "HOScrcpy Contributors"}
+]
+keywords = ["harmonyos", "scrcpy", "device-control", "automation", "testing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+]
+
+dependencies = [
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+jpype = ["jpype1>=1.5.0"]
+av = ["av>=12.0"]
+server = ["websockets>=12.0"]
+all = ["hos-scrcpy[jpype,av,server]"]
+
+[project.scripts]
+hos-scrcpy = "hos_scrcpy.gui.app:main"
+
+[project.urls]
+Homepage = "https://github.com/huawei/HOScrcpy"
+
+[tool.setuptools.packages.find]
+include = ["hos_scrcpy*"]
+
+[tool.setuptools.package-data]
+"hos_scrcpy.toolchains" = ["*"]
