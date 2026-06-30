@@ -709,6 +709,9 @@ class MainWindow(tk.Tk):
         if self._touch is not None:
             # Java stream active — FastTouch for low-latency touch
             self._mirror.set_controllers(self._touch, self._keyboard)
+            # Update finder's touch controller so click_by_* uses fast path
+            if hasattr(self, '_finder') and self._finder:
+                self._finder._touch = self._touch
             self.after(0, lambda: self._status.configure(
                 text="LIVE {0} - native stream active".format(self._device)
             ))

@@ -108,7 +108,12 @@ class HOSDevice:
         return self._device.screenshot(save_path)
 
     def dump_layout(self, save_path: str = None) -> str | None:
-        return self._device.dump_layout(save_path)
+        """Dump UI hierarchy as JSON string (delegates to UIHierarchy)."""
+        root = self.dump_ui()
+        if root is None:
+            return None
+        import json
+        return json.dumps(root.to_dict(), ensure_ascii=False)
 
     def execute_shell(self, cmd: str, timeout: int = 10) -> str:
         return self._device.execute_shell(cmd, timeout)

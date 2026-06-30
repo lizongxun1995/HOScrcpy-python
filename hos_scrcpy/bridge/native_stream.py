@@ -89,6 +89,15 @@ def _find_java():
 
 
 _LIBS_DIR = _find_libs_dir()
+_JAVA_PATH: str | None = None
+
+
+def _find_java_cached() -> str:
+    """Cached wrapper around _find_java(). Only searches disk once."""
+    global _JAVA_PATH
+    if _JAVA_PATH is None:
+        _JAVA_PATH = _find_java()
+    return _JAVA_PATH
 
 
 def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait_ready: bool = True, ready_timeout: float = 35.0):
@@ -100,7 +109,7 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait
     """
     from hos_scrcpy.core.hdc_client import _find_hdc
     hdc_path = _find_hdc() or "hdc"
-    java_path = _find_java()
+    java_path = _find_java_cached()
     classpath = os.path.join(_LIBS_DIR, "*") + os.pathsep + _BRIDGE_DIR
 
     java_cmd = [
