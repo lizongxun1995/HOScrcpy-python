@@ -722,53 +722,21 @@ class MainWindow(tk.Tk):
         self._stream_thread.start()
 
     def _stream_loop(self):
-        """Background: read frames from Java bridge or screenshot fallback."""
-        self._touch = self._capture.start_java_stream(self._on_frame, wait_ready=False)
+        """Background: start Java video stream with uitest auto-restart."""
+        self._touch = self._capture.start_java_stream(self._on_frame, wait_ready=True)
         if self._touch is not None:
-            # Java stream started — wait for first frame or fall back
             self._mirror.set_controllers(self._touch, self._keyboard)
             self.after(0, lambda: self._status.configure(
-                text="LIVE {0} - native stream starting...".format(self._device)
+                text="LIVE {0} - Java stream active".format(self._device)
             ))
-            # Frame watchdog: if no frame in 8s, fall back to screenshots
-            self._frame_watchdog = self.after(8000, self._on_stream_stall)
         else:
-            self._start_fallback_stream()
-    def _start_fallback_stream(self):
-        """Start screenshot/H.264 stream as fallback when Java stream fails."""
-        self._capture.stop()
-        self._touch = AsyncTouchController(TouchController(self._device))
-        self._mirror.set_controllers(self._touch, self._keyboard)
-
-        try:
-            import av  # noqa: F401
-            self.after(0, lambda: self._status.configure(
-                text="LIVE {0} - H.264 screenrecord stream".format(self._device)
-            ))
-            self._capture.start_native_stream(self._on_frame)
-            return
-        except ImportError:
-            pass
-
-        self.after(0, lambda: self._status.configure(
-            text="LIVE {0} - screenshot mode (2fps)".format(self._device)
-        ))
-        self._capture.start_screenshot_stream(self._on_frame, interval=0.5)
-
-    def _on_stream_stall(self):
-        """Called when Java stream produces no frames within timeout."""
-        if self._stream_running and self._capture and self._capture.is_streaming:
-            if self._latest_frame is None:
-                logger.warning(f"{TAG}: Java stream stall — falling back to screenshots")
-                self._start_fallback_stream()
-
+            messagebox.showwarning("Stream Error",
+                "Failed to start video stream.\n"
+                "Please reboot the device and try again.")
+            self._stop_cast()
     def _on_frame(self, jpeg: bytes):
         """Called from background thread when a new frame is ready."""
         self._latest_frame = jpeg
-        # Cancel frame watchdog — stream is alive
-        if hasattr(self, '_frame_watchdog'):
-            self.after_cancel(self._frame_watchdog)
-            del self._frame_watchdog
 
     def _render_tick(self):
         """Main thread: render latest frame at target 60fps."""

@@ -128,21 +128,6 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait
     java_path = _find_java_cached()
     classpath = os.path.join(_LIBS_DIR, "*") + os.pathsep + _BRIDGE_DIR
 
-    # Restart device uitest daemon to clear stale image channel sessions
-    try:
-        restart_cmds = (
-            f'"killall uitest 2>/dev/null";'
-            f' "kill -9 \$(pidof uitest) 2>/dev/null";'
-            f' "sleep 0.5";'
-            f' "uitest start-daemon token 2>/dev/null &"'
-        )
-        subprocess.run(
-            f'"{hdc_path}" -t {sn} shell "{restart_cmds}"',
-            shell=True, timeout=8, capture_output=True,
-        )
-        logger.debug(f"{TAG}: uitest daemon restarted for {sn}")
-    except Exception:
-        pass
 
     java_cmd = [
         java_path, "-cp", classpath, "StreamBridge", sn, ip, str(port), hdc_path,
@@ -167,16 +152,17 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait
         java_log = []
 
         def _wait_ready():
-            for line in java_proc.stderr:
-                msg = line.decode("utf-8", errors="replace").strip()
-                if msg:
-                    logger.info(f"{TAG}: JAVA {msg}")
-                    java_log.append(msg)
-                    if "READY" in msg:
-                        ready_event.set()
-                        break
-                elif not ready_event.is_set():
-                    break  # stderr closed before READY
+            try:
+                for line in java_proc.stderr:
+                    msg = line.decode("utf-8", errors="replace").strip()
+                    if msg:
+                        logger.info(f"{TAG}: JAVA {msg}")
+                        java_log.append(msg)
+                        if "READY" in msg:
+                            ready_event.set()
+                            break
+            except Exception:
+                pass  # stderr closed or read error
             # Continue logging remaining stderr (touch commands, warnings)
             for line in java_proc.stderr:
                 msg = line.decode("utf-8", errors="replace").strip()
