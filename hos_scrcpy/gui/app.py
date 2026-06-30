@@ -705,7 +705,7 @@ class MainWindow(tk.Tk):
 
     def _stream_loop(self):
         """Background: read frames from Java bridge or screenshot fallback."""
-        self._touch = self._capture.start_java_stream(self._on_frame)
+        self._touch = self._capture.start_java_stream(self._on_frame, wait_ready=False)
         if self._touch is not None:
             # Java stream active — FastTouch for low-latency touch
             self._mirror.set_controllers(self._touch, self._keyboard)

@@ -214,11 +214,16 @@ class ScreenCapture:
 
     # ---- Java StreamBridge mode ----
 
-    def start_java_stream(self, on_frame):
+    def start_java_stream(self, on_frame, wait_ready: bool = False):
         """Start low-latency JPEG stream via Java StreamBridge subprocess.
 
         Launches StreamBridge.java which connects to the device via the
         hdc SDK, captures JPEG frames, and relays touch commands via stdin.
+
+        Args:
+            on_frame: Callback(jpeg_bytes) for each frame.
+            wait_ready: If True, blocks until Java READY signal (up to 35s).
+                        Set False for GUI (touch must work immediately).
 
         Returns a FastTouchController for touch injection, or None on failure.
         """
@@ -230,7 +235,8 @@ class ScreenCapture:
 
         self._running = True
         result = start_native_bridge(
-            self._device.sn, self._device.ip, self._device.port
+            self._device.sn, self._device.ip, self._device.port,
+            wait_ready=wait_ready,
         )
 
         if result is None:
