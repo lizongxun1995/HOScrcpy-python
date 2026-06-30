@@ -193,6 +193,59 @@ class HOSDevice:
         """Switch back to USB debugging mode."""
         return self._device.enable_usb_mode()
 
+    # ---- app management ----
+
+    def app_start(self, bundle_name: str, ability_name: str = "EntryAbility") -> str:
+        """Launch an app. Like uiautomator2's d.app_start()."""
+        from hos_scrcpy.utils.apps import app_start as _app_start
+        return _app_start(self._device, bundle_name, ability_name)
+
+    def app_stop(self, bundle_name: str) -> str:
+        """Force-stop an app."""
+        from hos_scrcpy.utils.apps import app_stop as _app_stop
+        return _app_stop(self._device, bundle_name)
+
+    def app_list(self) -> list[str]:
+        """List installed third-party app bundle names."""
+        from hos_scrcpy.utils.apps import app_list as _app_list
+        return _app_list(self._device)
+
+    def app_info(self, bundle_name: str) -> dict | None:
+        """Get info about an installed app."""
+        from hos_scrcpy.utils.apps import app_info as _app_info
+        return _app_info(self._device, bundle_name)
+
+    # ---- device info ----
+
+    @property
+    def info(self) -> dict:
+        """Device info dict (model, OS version, SDK version)."""
+        from hos_scrcpy.utils.apps import device_info
+        return device_info(self._device)
+
+    # ---- screen control ----
+
+    def screen_on(self) -> bool:
+        """Turn screen on (idempotent)."""
+        from hos_scrcpy.utils.apps import screen_on
+        return screen_on(self._device)
+
+    def screen_off(self) -> bool:
+        """Turn screen off (idempotent)."""
+        from hos_scrcpy.utils.apps import screen_off
+
+    # ---- file transfer ----
+
+    def push(self, local_path: str, remote_path: str) -> bool:
+        """Push a file to device."""
+        from hos_scrcpy.utils.apps import push
+        return push(self._device, local_path, remote_path)
+
+    def pull(self, remote_path: str, local_path: str) -> bool:
+        """Pull a file from device."""
+        from hos_scrcpy.utils.apps import pull
+        return pull(self._device, remote_path, local_path)
+
     def __repr__(self) -> str:
         return f"HOSDevice({self._device})"
 
