@@ -725,38 +725,50 @@ class MainWindow(tk.Tk):
         """Background: read frames from Java bridge or screenshot fallback."""
         self._touch = self._capture.start_java_stream(self._on_frame, wait_ready=False)
         if self._touch is not None:
-            # Java stream active — FastTouch for low-latency touch
+            # Java stream started — wait for first frame or fall back
             self._mirror.set_controllers(self._touch, self._keyboard)
-            # Update finder's touch controller so click_by_* uses fast path
-            if hasattr(self, '_finder') and self._finder:
-                self._finder._touch = self._touch
             self.after(0, lambda: self._status.configure(
-                text="LIVE {0} - native stream active".format(self._device)
+                text="LIVE {0} - native stream starting...".format(self._device)
             ))
+            # Frame watchdog: if no frame in 8s, fall back to screenshots
+            self._frame_watchdog = self.after(8000, self._on_stream_stall)
         else:
-            self._touch = AsyncTouchController(TouchController(self._device))
-            self._mirror.set_controllers(self._touch, self._keyboard)
+            self._start_fallback_stream()
+    def _start_fallback_stream(self):
+        """Start screenshot/H.264 stream as fallback when Java stream fails."""
+        self._capture.stop()
+        self._touch = AsyncTouchController(TouchController(self._device))
+        self._mirror.set_controllers(self._touch, self._keyboard)
 
-            # Try H.264 screenrecord (30-60fps, needs PyAV)
-            try:
-                import av  # noqa: F401
-                self.after(0, lambda: self._status.configure(
-                    text="LIVE {0} - H.264 screenrecord stream".format(self._device)
-                ))
-                self._capture.start_native_stream(self._on_frame)
-                return
-            except ImportError:
-                pass
-
-            # Final fallback: screenshot polling (~2fps)
+        try:
+            import av  # noqa: F401
             self.after(0, lambda: self._status.configure(
-                text="LIVE {0} - screenshot mode (2fps)".format(self._device)
+                text="LIVE {0} - H.264 screenrecord stream".format(self._device)
             ))
-            self._capture.start_screenshot_stream(self._on_frame, interval=0.5)
+            self._capture.start_native_stream(self._on_frame)
+            return
+        except ImportError:
+            pass
+
+        self.after(0, lambda: self._status.configure(
+            text="LIVE {0} - screenshot mode (2fps)".format(self._device)
+        ))
+        self._capture.start_screenshot_stream(self._on_frame, interval=0.5)
+
+    def _on_stream_stall(self):
+        """Called when Java stream produces no frames within timeout."""
+        if self._stream_running and self._capture and self._capture.is_streaming:
+            if self._latest_frame is None:
+                logger.warning(f"{TAG}: Java stream stall — falling back to screenshots")
+                self._start_fallback_stream()
 
     def _on_frame(self, jpeg: bytes):
         """Called from background thread when a new frame is ready."""
         self._latest_frame = jpeg
+        # Cancel frame watchdog — stream is alive
+        if hasattr(self, '_frame_watchdog'):
+            self.after_cancel(self._frame_watchdog)
+            del self._frame_watchdog
 
     def _render_tick(self):
         """Main thread: render latest frame at target 60fps."""
