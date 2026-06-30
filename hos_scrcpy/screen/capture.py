@@ -102,16 +102,22 @@ class ScreenCapture:
 
         # Check stderr for errors — use thread for cross-platform compatibility
         err_lines = []
+        stderr_done = threading.Event()
+
         def _read_stderr():
             try:
-                line = proc.stderr.readline()
-                if line:
-                    err_lines.append(line.decode("utf-8", errors="replace").strip())
+                for line in proc.stderr:
+                    decoded = line.decode("utf-8", errors="replace").strip()
+                    if decoded:
+                        err_lines.append(decoded)
             except Exception:
                 pass
-        stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
-        stderr_thread.start()
-        stderr_thread.join(timeout=3)
+            finally:
+                stderr_done.set()
+
+        threading.Thread(target=_read_stderr, daemon=True).start()
+        if not stderr_done.wait(timeout=3):
+            pass  # still initializing, continue
 
         if err_lines and "error" in err_lines[0].lower():
             logger.warning(f"{TAG}: screenrecord stderr: {err_lines[0]}")
@@ -120,6 +126,9 @@ class ScreenCapture:
                 on_error(f"screenrecord: {err_lines[0]}")
             self._fallback_to_screenshots(on_frame, on_error, on_ready)
             return
+
+        # Store for cleanup in stop()
+        self._proc = proc
 
         logger.info(f"{TAG}: native H.264 stream started")
         if on_ready:
@@ -244,6 +253,7 @@ class ScreenCapture:
             return None
 
         output_proc, java_proc = result
+        self._proc = java_proc  # store for stop() cleanup
         touch = FastTouchController(java_proc)
 
         def _stream_loop():
@@ -255,6 +265,7 @@ class ScreenCapture:
             except Exception as ex:
                 logger.error(f"{TAG}: java stream error: {ex}")
             finally:
+                self._proc = None
                 try:
                     java_proc.kill()
                 except Exception:
@@ -268,6 +279,15 @@ class ScreenCapture:
 
     def stop(self) -> None:
         self._running = False
+        # Kill captured subprocess ref to unblock stdout reader threads
+        for attr in ('_proc',):
+            p = getattr(self, attr, None)
+            if p:
+                try:
+                    p.kill()
+                    p.wait(timeout=5)
+                except Exception:
+                    pass
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3)
             self._thread = None

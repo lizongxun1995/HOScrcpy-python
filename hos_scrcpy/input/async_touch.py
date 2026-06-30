@@ -7,12 +7,13 @@ Mouse event handlers return immediately without waiting for hdc subprocess.
 import queue
 import threading
 from hos_scrcpy.input.touch import TouchController
+from hos_scrcpy.interfaces import TouchProvider
 from hos_scrcpy.utils.logger import logger
 
 TAG = "AsyncTouch"
 
 
-class AsyncTouchController:
+class AsyncTouchController(TouchProvider):
     """Non-blocking touch controller for GUI use.
 
     Queues touch commands and executes them in a background thread

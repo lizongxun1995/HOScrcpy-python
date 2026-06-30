@@ -5,12 +5,13 @@ Mirrors the HosRemoteDevice touch methods and MainForm touch callbacks.
 
 import time
 from hos_scrcpy.core.device import Device
+from hos_scrcpy.interfaces import TouchProvider
 from hos_scrcpy.utils.logger import logger
 
 TAG = "Touch"
 
 
-class TouchController:
+class TouchController(TouchProvider):
     """Inject touch events on a HarmonyOS device.
 
     Uses 'uinput -M' (multi-touch) commands via hdc shell.
@@ -85,6 +86,8 @@ class TouchController:
             duration: Total swipe time in seconds.
             steps: Number of intermediate move events.
         """
+        steps = max(1, steps)
+        duration = max(0.01, duration)
         self.down(x1, y1)
         step_delay = duration / steps
         for i in range(1, steps + 1):

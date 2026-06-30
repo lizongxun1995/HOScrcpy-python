@@ -4,12 +4,13 @@ Down/up: sent immediately. Move: throttled to max 20/sec, skip tiny deltas.
 """
 
 import time
+from hos_scrcpy.interfaces import TouchProvider
 from hos_scrcpy.utils.logger import logger
 
 TAG = "FastTouch"
 
 
-class FastTouchController:
+class FastTouchController(TouchProvider):
     """Low-latency touch using StreamBridge stdin. Runs writes in daemon thread."""
 
     def __init__(self, java_proc):
@@ -62,6 +63,8 @@ class FastTouchController:
         For standalone use only. GUI should use down()+move()+up() separately
         since _on_press already sends the initial down.
         """
+        steps = max(1, steps)
+        duration = max(0.01, duration)
         self.down(x1, y1)
         for i in range(1, steps + 1):
             frac = i / steps

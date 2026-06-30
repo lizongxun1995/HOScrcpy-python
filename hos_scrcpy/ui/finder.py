@@ -46,9 +46,11 @@ class UIFinder:
         return self._root
 
     def _ensure_root(self) -> JsonStructure | None:
-        """Ensure UI tree is loaded. Returns root or None."""
+        """Ensure UI tree is loaded. Retries once on failure."""
         if self._root is None:
             self.dump()
+        if self._root is None:
+            self.dump()  # retry once
         return self._root
 
     # ---- find core ----

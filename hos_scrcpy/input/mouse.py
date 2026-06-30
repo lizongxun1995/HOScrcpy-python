@@ -6,6 +6,7 @@ falls back to protocol-level calls when JPype bridge is available.
 """
 
 from hos_scrcpy.core.device import Device
+from hos_scrcpy.interfaces import MouseProvider
 from hos_scrcpy.utils.logger import logger
 
 TAG = "Mouse"
@@ -17,7 +18,7 @@ MOUSE_RIGHT = "RIGHT"
 _BUTTON_CODE = {MOUSE_LEFT: 0, MOUSE_MIDDLE: 1, MOUSE_RIGHT: 1}
 
 
-class MouseController:
+class MouseController(MouseProvider):
     """Inject mouse events on a HarmonyOS device.
 
     For devices with uitest >= 5.1.1.3 full mouse support (drag, wheel) is available.

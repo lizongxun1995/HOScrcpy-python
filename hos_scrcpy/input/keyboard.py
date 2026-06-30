@@ -6,12 +6,13 @@ Also supports Chinese text input via 'uitest uiInput'.
 
 from hos_scrcpy.core.device import Device
 from hos_scrcpy.input.keycode import KeyCode, keycode_for_char
+from hos_scrcpy.interfaces import KeyboardProvider
 from hos_scrcpy.utils.logger import logger
 
 TAG = "Keyboard"
 
 
-class KeyboardController:
+class KeyboardController(KeyboardProvider):
     """Inject key events and text on a HarmonyOS device."""
 
     def __init__(self, device: Device):
@@ -46,6 +47,8 @@ class KeyboardController:
 
         Uses 'uitest uiInput text' command which handles IME input.
         """
+        if not text:
+            return ""
         # Escape single quotes in text for shell safety
         safe_text = text.replace("'", "'\\''")
         cmd = f"uitest uiInput text '{safe_text}'"
@@ -117,6 +120,8 @@ class KeyboardController:
 
         Non-printable / CJK characters fall back to input_text.
         """
+        if not text:
+            return
         for ch in text:
             if ch.isascii() and ch.isprintable():
                 self.type_char(ch)
