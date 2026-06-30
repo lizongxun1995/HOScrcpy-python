@@ -408,15 +408,38 @@ class DemoApp(tk.Tk):
     # ── 设备发现 ──────────────────────────────────────────────────────
 
     def _refresh(self):
+        """扫描设备：先扫本地（秒出），后台扫远程。"""
         self._btn_refresh.configure(state="disabled")
         self._status.configure(text="扫描设备...")
 
-        def _do():
-            devices = HOSDevice.list_devices()
-            names = [str(d) for d in devices]
-            self.after(0, lambda: self._on_refresh(names))
+        # 第一步：快速扫本地 USB 设备
+        local = Device.list_local()
+        local_names = [str(d) for d in local]
+        self._on_refresh(local_names)
 
-        threading.Thread(target=_do, daemon=True).start()
+        # 第二步：后台扫远程设备（可能慢）
+        def _scan_remote():
+            try:
+                from hos_scrcpy.utils.settings import get_remote_ips
+                ips = get_remote_ips()
+                if not ips:
+                    return
+                remote = Device.list_remote(ips)
+                all_devices = local + remote
+                # 去重
+                seen = set()
+                unique = []
+                for d in all_devices:
+                    key = (d.sn, d.ip)
+                    if key not in seen:
+                        seen.add(key)
+                        unique.append(d)
+                names = [str(d) for d in unique]
+                self.after(0, lambda: self._on_refresh(names))
+            except Exception:
+                pass
+
+        threading.Thread(target=_scan_remote, daemon=True).start()
 
     def _on_refresh(self, names):
         self._btn_refresh.configure(state="normal")

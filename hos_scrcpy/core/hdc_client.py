@@ -106,7 +106,7 @@ class HdcClient:
 
     # ---- commands ----
 
-    def list_targets(self) -> str:
+    def list_targets(self, timeout: int = 10) -> str:
         """List all connected device targets."""
         if not self.is_available():
             return ""
@@ -116,7 +116,7 @@ class HdcClient:
             args = [hdc, "list", "targets"]
         else:
             args = [hdc, "-s", f"{self.ip}:{self.port}", "list", "targets"]
-        return self._run(args, timeout=10)
+        return self._run(args, timeout=timeout)
 
     def shell(self, sn: str, command: str, timeout: int = 10) -> str:
         """Execute a shell command on the device.

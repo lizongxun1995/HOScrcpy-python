@@ -34,18 +34,36 @@ def _unregister_proc(p):
             pass
 
 
+def _kill_proc_tree(proc):
+    """Kill a process and its children. Cross-platform.
+
+    On Windows uses taskkill /T to kill the process tree.
+    On POSIX uses proc.kill() (SIGTERM).
+    """
+    import os
+    try:
+        if os.name == "nt" and proc.pid:
+            import subprocess as _sp
+            _sp.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True, timeout=5)
+        else:
+            proc.kill()
+            proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=3)
+        except Exception:
+            pass
+
+
 def _cleanup_procs():
     """Kill all active Java subprocesses on exit."""
     with _ACTIVE_PROCS_LOCK:
         procs = list(_ACTIVE_PROCS)
         _ACTIVE_PROCS.clear()
     for p in procs:
-        try:
-            if p.poll() is None:
-                p.kill()
-                p.wait(timeout=3)
-        except Exception:
-            pass
+        _kill_proc_tree(p)
 
 import atexit
 atexit.register(_cleanup_procs)
@@ -137,6 +155,31 @@ def _find_java_cached() -> str:
     return _JAVA_PATH
 
 
+def _cleanup_stale_procs(sn: str = None):
+    """Kill any orphaned java/StreamBridge processes from previous runs."""
+    import os
+    if os.name != "nt":
+        return
+    try:
+        import subprocess as _sp, re
+        # 用 wmic 获取所有 java.exe 的 PID 和命令行
+        result = _sp.run(
+            ["wmic", "process", "where", "name='java.exe'",
+             "get", "ProcessId,CommandLine", "/format:csv"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.splitlines():
+            if "StreamBridge" in line:
+                parts = line.split(",")
+                if len(parts) >= 2:
+                    pid = parts[-1].strip()
+                    if pid.isdigit():
+                        _sp.run(["taskkill", "/F", "/T", "/PID", pid],
+                                capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
 def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait_ready: bool = True, ready_timeout: float = 35.0):
     """Launch Java StreamBridge for JPEG image streaming.
 
@@ -152,6 +195,9 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait
     java_cmd = [
         java_path, "-cp", classpath, "StreamBridge", sn, ip, str(port), hdc_path,
     ]
+
+    # 启动前清理同设备的残留 Java 进程
+    _cleanup_stale_procs(sn)
 
     try:
         java_proc = subprocess.Popen(

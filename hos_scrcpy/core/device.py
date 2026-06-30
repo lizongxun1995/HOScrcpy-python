@@ -42,13 +42,13 @@ class Device:
 
     @staticmethod
     def list_remote(ips: list[str]) -> list["Device"]:
-        """List remote devices reachable at the given IP addresses."""
+        """List remote devices reachable at the given IP addresses (3s timeout)."""
         if not HdcClient.is_available():
             return []
         devices = []
         for ip in ips:
             client = HdcClient(ip)
-            result = client.list_targets()
+            result = client.list_targets(timeout=3)
             for sn in Device._parse_sn_list(result):
                 devices.append(Device(sn=sn, ip=ip))
         return devices
@@ -64,7 +64,7 @@ class Device:
                 ip = parts[0]
                 port = parts[1] if len(parts) == 2 else "8710"
                 client = HdcClient(ip, port)
-                result = client.list_targets()
+                result = client.list_targets(timeout=3)
                 for sn in Device._parse_sn_list(result):
                     if not any(d.sn == sn for d in devices):
                         devices.append(Device(sn=sn, ip=ip, port=port))

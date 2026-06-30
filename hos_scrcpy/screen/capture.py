@@ -139,7 +139,7 @@ class ScreenCapture:
 
         if err_lines and "error" in err_lines[0].lower():
             logger.warning(f"{TAG}: screenrecord stderr: {err_lines[0]}")
-            proc.kill()
+            _kill_proc_tree(proc)
             if on_error:
                 on_error(f"screenrecord: {err_lines[0]}")
             self._fallback_to_screenshots(on_frame, on_error, on_ready)
@@ -147,6 +147,8 @@ class ScreenCapture:
 
         # Store for cleanup in stop()
         self._proc = proc
+        # Kill any old screenrecord process still running
+        from hos_scrcpy.bridge.native_stream import _kill_proc_tree
 
         logger.info(f"{TAG}: native H.264 stream started")
         if on_ready:
@@ -162,15 +164,14 @@ class ScreenCapture:
             if on_error:
                 on_error(str(ex))
         finally:
-            proc.kill()
-            proc.wait()
+            _kill_proc_tree(proc)
 
     def _decode_h264_stream(self, proc, on_frame):
         try:
             import av
         except ImportError:
             logger.warning(f"{TAG}: PyAV not installed, falling back to screenshots")
-            proc.kill()
+            _kill_proc_tree(proc)
             raise RuntimeError("PyAV required for native stream: pip install av")
 
         codec = av.CodecContext.create("h264", "r")
@@ -285,7 +286,7 @@ class ScreenCapture:
             finally:
                 self._proc = None
                 try:
-                    java_proc.kill()
+                    _kill_proc_tree(java_proc)
                 except Exception:
                     pass
 
@@ -299,14 +300,12 @@ class ScreenCapture:
         self._running = False
         self._stop_event.set()  # signal all loops to exit
 
-        # Kill captured subprocess to unblock any I/O
+        # Kill captured subprocess tree to unblock any I/O
         p = self._proc
         if p:
-            try:
-                p.kill()
-                p.wait(timeout=5)
-            except Exception:
-                pass
+            from hos_scrcpy.bridge.native_stream import _kill_proc_tree
+            _kill_proc_tree(p)
+            self._proc = None
             self._proc = None
 
         if self._thread and self._thread.is_alive():
