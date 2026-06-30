@@ -251,8 +251,8 @@ class DeviceMirror(tk.Frame):
                 )
             else:
                 self._canvas.itemconfig(self._image_id, image=self._photo)
-        except Exception:
-            pass
+        except Exception as ex:
+            logger.debug(f"{TAG}: set_jpeg error: {ex}")
 
     def _redraw(self):
         if self._current_image is None:

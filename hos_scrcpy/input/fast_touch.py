@@ -15,22 +15,25 @@ class FastTouchController(TouchProvider):
 
     def __init__(self, java_proc):
         self._stdin = java_proc.stdin if java_proc else None
+        self._dead = False
         self._last_move_time = 0
         self._last_sent = (0, 0)
         if self._stdin is None:
             logger.warning(f"{TAG}: stdin is None — touch commands will be skipped")
+            self._dead = True
         else:
             logger.info(f"{TAG}: initialized, stdin={self._stdin}")
 
     def _write(self, line):
-        if self._stdin is None:
+        if self._dead:
             return
         try:
             self._stdin.write((line + "\n").encode())
             self._stdin.flush()
             logger.debug(f"{TAG}: sent {line}")
         except Exception as ex:
-            logger.error(f"{TAG}: write error: {ex}")
+            logger.error(f"{TAG}: write error, marking dead: {ex}")
+            self._dead = True
 
     def down(self, x, y, contact=0):
         self._write(f"D:{x}:{y}")

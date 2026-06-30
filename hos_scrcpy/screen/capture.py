@@ -53,14 +53,21 @@ class ScreenCapture:
         logger.info(f"{TAG}: screenshot stream started interval={interval:.2f}s")
 
     def _screenshot_loop(self, on_frame, interval: float):
+        failures = 0
         while self._running:
             start = time.monotonic()
             try:
                 data = self._device.screenshot()
                 if data and self._running:
                     on_frame(data)
+                    failures = 0
             except Exception as ex:
-                logger.error(f"{TAG}: screenshot error: {ex}")
+                failures += 1
+                logger.error(f"{TAG}: screenshot error (#{failures}): {ex}")
+                if failures >= 5:
+                    logger.error(f"{TAG}: {failures} consecutive failures, stopping")
+                    self._running = False
+                    break
             elapsed = time.monotonic() - start
             time.sleep(max(0.05, interval - elapsed))
 
