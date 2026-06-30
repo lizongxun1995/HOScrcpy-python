@@ -123,7 +123,12 @@ class HdcClient:
         """List all connected device targets."""
         if not self.is_available():
             return ""
-        cmd = f"{self._base_cmd()} list targets"
+        hdc = _find_hdc() or "hdc"
+        # For localhost, skip -s (auto-discover is instant)
+        if self.ip in ("127.0.0.1", "localhost", "::1"):
+            cmd = f'"{hdc}" list targets'
+        else:
+            cmd = f'"{hdc}" -s {self._clean_arg(self.ip)}:{self._clean_arg(str(self.port))} list targets'
         return self._run(cmd, timeout=10)
 
     def shell(self, sn: str, command: str, timeout: int = 10) -> str:
