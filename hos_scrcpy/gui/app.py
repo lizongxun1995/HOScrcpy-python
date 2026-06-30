@@ -228,20 +228,38 @@ class DeviceMirror(tk.Frame):
     # ---- drawing ----
 
     def set_jpeg(self, jpeg_bytes: bytes):
-        """Render JPEG on canvas: scale to fit, update PhotoImage."""
+        """Render JPEG on canvas: scale to fit, update PhotoImage.
+
+        Uses JPEG draft mode to decode at ~1/4 resolution for speed.
+        """
         try:
             img = Image.open(BytesIO(jpeg_bytes))
+            # Use draft mode: tell JPEG decoder to decode at reduced resolution
+            # This avoids full 1280x2832 decode — massive speedup
+            cw = self._canvas.winfo_width()
+            ch = self._canvas.winfo_height()
+            if cw < 10 or ch < 10:
+                return
+
+            # Request draft at display resolution ≈ fraction of full
+            scale = min(cw / img.width, ch / img.height)
+            new_w, new_h = int(img.width * scale), int(img.height * scale)
+
+            # draft() reduces decode resolution (powers of 2: 1, 2, 4, 8)
+            # Find best draft scale: target ≤ display resolution
+            for draft_scale in (8, 4, 2, 1):
+                dw = max(1, img.width // draft_scale)
+                dh = max(1, img.height // draft_scale)
+                if dw >= new_w and dh >= new_h:
+                    img.draft('RGB', (dw, dh))
+                    break
+
             img.load()
             self._current_image = img
             self._device_width = img.width
             self._device_height = img.height
 
-            cw = self._canvas.winfo_width()
-            ch = self._canvas.winfo_height()
-            if cw < 10 or ch < 10:
-                return
-            scale = min(cw / img.width, ch / img.height)
-            new_w, new_h = int(img.width * scale), int(img.height * scale)
+            # Resize from draft resolution to display resolution (fast, small image)
             resized = img.resize((new_w, new_h), Image.NEAREST)
 
             self._photo = ImageTk.PhotoImage(resized)
@@ -741,18 +759,31 @@ class MainWindow(tk.Tk):
         self._latest_frame = jpeg
 
     def _render_tick(self):
-        """Main thread: render latest frame at ~60fps."""
+        """Main thread: render latest frame at target 60fps."""
         if not self._stream_running:
             return
         jpeg = self._latest_frame
         if jpeg is not None and jpeg is not self._last_rendered:
             self._last_rendered = jpeg
+            now = time.monotonic()
             self._mirror.set_jpeg(jpeg)
             self._frame_count += 1
+            # Show FPS every 30 frames
+            if self._frame_count % 30 == 0:
+                if not hasattr(self, '_fps_t0'):
+                    self._fps_t0 = now
+                    self._fps_n0 = self._frame_count
+                else:
+                    dt = now - self._fps_t0
+                    df = self._frame_count - self._fps_n0
+                    fps = df / dt if dt > 0 else 0
+                    self._fps_t0 = now
+                    self._fps_n0 = self._frame_count
+                    logger.info(f"{TAG}: {fps:.0f} fps (frame #{self._frame_count})")
             self._status.configure(
                 text="LIVE {0} - frame #{1}".format(self._device, self._frame_count)
             )
-        self._render_timer_id = self.after(16, self._render_tick)
+        self._render_timer_id = self.after(8, self._render_tick)
 
     def _stop_cast(self):
         self._stream_running = False
