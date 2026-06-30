@@ -91,12 +91,12 @@ def _find_java():
 _LIBS_DIR = _find_libs_dir()
 
 
-def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710"):
+def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait_ready: bool = True, ready_timeout: float = 35.0):
     """Launch Java StreamBridge for JPEG image streaming.
 
-    Returns (java_proc, java_proc) — the same process serves as both
-    the frame source (stdout) and touch sink (stdin).
-    Returns None if Java is unavailable.
+    Returns (output_proc, java_proc) on success, None if Java unavailable.
+    If wait_ready=True, waits for the Java "READY" signal (image channel active).
+    Returns None if READY doesn't arrive within ready_timeout seconds.
     """
     from hos_scrcpy.core.hdc_client import _find_hdc
     hdc_path = _find_hdc() or "hdc"
@@ -119,15 +119,51 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710"):
         logger.error(f"{TAG}: failed to start java: {ex}")
         return None
 
-    # Monitor java stderr
-    def _log_java():
-        for line in java_proc.stderr:
-            msg = line.decode("utf-8", errors="replace").strip()
-            if msg:
-                logger.info(f"{TAG}: JAVA {msg}")
-    threading.Thread(target=_log_java, daemon=True).start()
+    if wait_ready:
+        # Read stderr line-by-line until READY or timeout
+        ready_event = threading.Event()
+        java_log = []
 
-    logger.info(f"{TAG}: Java image stream started for {sn}")
+        def _wait_ready():
+            for line in java_proc.stderr:
+                msg = line.decode("utf-8", errors="replace").strip()
+                if msg:
+                    logger.info(f"{TAG}: JAVA {msg}")
+                    java_log.append(msg)
+                    if "READY" in msg:
+                        ready_event.set()
+                        break
+                elif not ready_event.is_set():
+                    break  # stderr closed before READY
+            # Continue logging remaining stderr (touch commands, warnings)
+            for line in java_proc.stderr:
+                msg = line.decode("utf-8", errors="replace").strip()
+                if msg:
+                    logger.info(f"{TAG}: JAVA {msg}")
+
+        threading.Thread(target=_wait_ready, daemon=True).start()
+
+        if not ready_event.wait(timeout=ready_timeout):
+            logger.error(f"{TAG}: Java StreamBridge READY timeout after {ready_timeout}s")
+            try:
+                java_proc.kill()
+                java_proc.wait(timeout=5)
+            except Exception:
+                pass
+            return None
+
+        logger.info(f"{TAG}: Java image stream ready for {sn}")
+    else:
+        # Just monitor stderr
+        def _log_java():
+            for line in java_proc.stderr:
+                msg = line.decode("utf-8", errors="replace").strip()
+                if msg:
+                    logger.info(f"{TAG}: JAVA {msg}")
+        threading.Thread(target=_log_java, daemon=True).start()
+
+        logger.info(f"{TAG}: Java image stream started for {sn}")
+
     return (java_proc, java_proc)
 
 
