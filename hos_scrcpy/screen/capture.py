@@ -27,6 +27,10 @@ class ScreenCapture:
         self._device = device
         self._running = False
         self._thread: threading.Thread | None = None
+        self._proc = None
+        # Register cleanup on exit
+        import atexit
+        atexit.register(self.stop)
 
     # ---- screenshot polling mode ----
 

@@ -12,6 +12,22 @@ import threading
 from hos_scrcpy.utils.logger import logger
 
 TAG = "NativeStream"
+_ACTIVE_PROCS: list = []  # Track all Java subprocesses for cleanup
+
+
+def _cleanup_procs():
+    """Kill all active Java subprocesses on exit."""
+    for p in _ACTIVE_PROCS:
+        try:
+            if p.poll() is None:
+                p.kill()
+                p.wait(timeout=3)
+        except Exception:
+            pass
+    _ACTIVE_PROCS.clear()
+
+import atexit
+atexit.register(_cleanup_procs)
 _JAVA_EXE = "java.exe" if os.name == "nt" else "java"
 
 _BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -124,6 +140,7 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait
             stderr=subprocess.PIPE,
             cwd=_BRIDGE_DIR,
         )
+        _ACTIVE_PROCS.append(java_proc)
     except Exception as ex:
         logger.error(f"{TAG}: failed to start java: {ex}")
         return None
@@ -159,6 +176,8 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait
                 java_proc.wait(timeout=5)
             except Exception:
                 pass
+            if java_proc in _ACTIVE_PROCS:
+                _ACTIVE_PROCS.remove(java_proc)
             return None
 
         logger.info(f"{TAG}: Java image stream ready for {sn}")
