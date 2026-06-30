@@ -7,6 +7,38 @@ Enables dependency injection, testing with mocks, and consistent API surface.
 from abc import ABC, abstractmethod
 
 
+# ---- custom exceptions ----
+
+class HOScrcpyError(Exception):
+    """Base exception for all hos-scrcpy errors."""
+    pass
+
+
+class DeviceOfflineError(HOScrcpyError):
+    """Device is not reachable or has gone offline."""
+    pass
+
+
+class ScreenshotError(HOScrcpyError):
+    """Failed to capture a screenshot from the device."""
+    pass
+
+
+class CommandNotSupportedError(HOScrcpyError):
+    """The device does not support the requested command/feature."""
+    pass
+
+
+class StreamError(HOScrcpyError):
+    """Video streaming error (Java bridge, H.264, or polling)."""
+    pass
+
+
+class UIHierarchyError(HOScrcpyError):
+    """Failed to dump or parse the UI hierarchy."""
+    pass
+
+
 class TouchProvider(ABC):
     """Interface for touch injection — uinput shell, Java stdin, async queue, etc."""
 

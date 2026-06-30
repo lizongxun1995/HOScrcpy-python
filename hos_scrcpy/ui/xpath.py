@@ -49,14 +49,21 @@ def _attr_str(node: JsonStructure) -> str:
     return ""
 
 
-def xpath_for(node: JsonStructure, root: JsonStructure = None) -> str:
+def xpath_for(node: JsonStructure, root: JsonStructure = None, parent_map: dict[int, JsonStructure] = None) -> str:
     """Generate a uiautomator2-style xpath string for a node.
 
     Uses id > text > key for attribute predicates. Falls back to
     type[index] when no distinguishing attribute is available.
+
+    Args:
+        node: The target node.
+        root: Optional root for building absolute path.
+        parent_map: Optional precomputed {id(child): parent} map for O(1) lookup.
     """
     if root is None:
         return f"{node.type or '?'}[@{_attr_str(node) or ''}]"
+    if parent_map is None and root is not None:
+        parent_map = _build_parent_map(root)
     parts = []
     cur = node
     while cur is not None and len(parts) < 100:
@@ -66,7 +73,7 @@ def xpath_for(node: JsonStructure, root: JsonStructure = None) -> str:
         else:
             # No unique attr — use sibling index
             idx = 0
-            parent = _find_parent(root, cur) if root else None
+            parent = _find_parent(root, cur, parent_map) if root else None
             if parent:
                 siblings = [c for c in parent.children if c.type == cur.type]
                 for i, s in enumerate(siblings):
@@ -76,7 +83,7 @@ def xpath_for(node: JsonStructure, root: JsonStructure = None) -> str:
             parts.append(f"/{cur.type}[{idx}]")
 
         if root:
-            cur = _find_parent(root, cur)
+            cur = _find_parent(root, cur, parent_map)
         else:
             break
 
@@ -84,8 +91,23 @@ def xpath_for(node: JsonStructure, root: JsonStructure = None) -> str:
     return "//" + "/".join(p[1:] for p in parts)  # strip leading /
 
 
-def _find_parent(root: JsonStructure, target: JsonStructure) -> JsonStructure | None:
-    """Find the parent of target node in the tree."""
+def _build_parent_map(root: JsonStructure) -> dict[int, JsonStructure]:
+    """Build a hash-based parent lookup: id(node) -> parent_node."""
+    parent_map = {}
+    for parent in root.iter_all():
+        for child in parent.children:
+            parent_map[id(child)] = parent
+    return parent_map
+
+
+def _find_parent(root: JsonStructure, target: JsonStructure, parent_map: dict[int, JsonStructure] | None = None) -> JsonStructure | None:
+    """Find the parent of target node in the tree.
+
+    Uses a pre-built parent_map for O(1) lookup when provided,
+    otherwise falls back to O(n) tree traversal.
+    """
+    if parent_map is not None:
+        return parent_map.get(id(target))
     for node in root.iter_all():
         for child in node.children:
             if child is target:

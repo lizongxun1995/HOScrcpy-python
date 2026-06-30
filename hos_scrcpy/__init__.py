@@ -49,6 +49,14 @@ from hos_scrcpy.input.keyboard import KeyboardController
 from hos_scrcpy.screen.capture import ScreenCapture
 from hos_scrcpy.ui.hierarchy import JsonStructure
 from hos_scrcpy.ui.selector import UIHierarchy, UiSelector
+from hos_scrcpy.interfaces import (
+    HOScrcpyError,
+    DeviceOfflineError,
+    ScreenshotError,
+    CommandNotSupportedError,
+    StreamError,
+    UIHierarchyError,
+)
 
 
 class HOSDevice:
@@ -282,4 +290,10 @@ __all__ = [
     "UIHierarchy",
     "UiSelector",
     "JsonStructure",
+    "HOScrcpyError",
+    "DeviceOfflineError",
+    "ScreenshotError",
+    "CommandNotSupportedError",
+    "StreamError",
+    "UIHierarchyError",
 ]

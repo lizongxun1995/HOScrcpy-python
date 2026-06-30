@@ -3,7 +3,15 @@
 import os
 import json
 import tempfile
+import uuid
 from hos_scrcpy.core.hdc_client import HdcClient
+from hos_scrcpy.interfaces import (
+    HOScrcpyError,
+    DeviceOfflineError,
+    ScreenshotError,
+    CommandNotSupportedError,
+    UIHierarchyError,
+)
 from hos_scrcpy.utils.logger import logger
 
 TAG = "Device"
@@ -20,8 +28,6 @@ class Device:
         self.ip = ip
         self.port = port
         self._client = HdcClient(ip, port)
-        # Pre-compute the fixed temp screenshot path for this device
-        self._scr_path = os.path.join(tempfile.gettempdir(), f"hdc-{sn}-screen.jpeg")
 
     # ---- factory methods ----
 
@@ -109,47 +115,69 @@ class Device:
     # ---- screenshot ----
 
     def screenshot(self, save_path: str = None) -> bytes | None:
-        """Capture a screenshot from the device."""
-        try:
-            if save_path is None:
-                save_path = self._scr_path
+        """Capture a screenshot from the device.
 
+        Each call uses a unique remote temp file to avoid races
+        when multiple threads capture concurrently.
+
+        Args:
+            save_path: Optional local path to persist the JPEG. If None,
+                       the image bytes are still returned but no file kept.
+
+        Returns:
+            JPEG bytes, or None on failure.
+
+        Raises:
+            ScreenshotError: All screenshot commands failed.
+        """
+        remote_path = "/data/local/tmp/" + uuid.uuid4().hex + ".jpeg"
+        local_path = save_path or os.path.join(
+            tempfile.gettempdir(),
+            f"hdc-{self.sn}-{uuid.uuid4().hex}.jpeg",
+        )
+        try:
             for cmd in [
-                "snapshot_display -f /data/local/tmp/screen.jpeg",
-                "screenshot -f /data/local/tmp/screen.jpeg",
-                "uitest screenshot -f /data/local/tmp/screen.jpeg",
+                f"snapshot_display -f {remote_path}",
+                f"screenshot -f {remote_path}",
+                f"uitest screenshot -f {remote_path}",
             ]:
-                self.execute_shell(
-                    f"rm -f /data/local/tmp/screen.jpeg",
-                    timeout=5,
-                )
-                result = self.execute_shell(
-                    cmd,
-                    timeout=7,
-                )
-                logger.debug(f"{TAG}: {cmd} → {result[:120] if result else '(empty)'}")
+                # Remove any stale file from a previous failed call
+                self.execute_shell(f"rm -f {remote_path}", timeout=5)
+                result = self.execute_shell(cmd, timeout=7)
+                logger.debug(f"{TAG}: {cmd} -> {result[:120] if result else '(empty)'}")
 
                 if result and ("error" not in result.lower() and "fail" not in result.lower() and "not found" not in result.lower()):
                     break
             else:
-                logger.error(f"{TAG}: all screenshot commands failed")
-                return None
+                raise ScreenshotError("all screenshot commands failed")
 
-            result = self.execute(
-                f'file recv /data/local/tmp/screen.jpeg "{save_path}"',
+            pull_result = self.execute(
+                f'file recv {remote_path} "{local_path}"',
                 timeout=5,
             )
-            logger.debug(f"{TAG}: file recv → {result[:120] if result else '(empty)'}")
+            logger.debug(f"{TAG}: file recv -> {pull_result[:120] if pull_result else '(empty)'}")
 
-            if not os.path.exists(save_path):
-                logger.error(f"{TAG}: screenshot file not at {save_path}")
-                return None
+            if not os.path.exists(local_path):
+                raise ScreenshotError(f"screenshot file not found at {local_path}")
 
-            with open(save_path, "rb") as f:
+            with open(local_path, "rb") as f:
                 return f.read()
+        except HOScrcpyError:
+            raise
         except Exception as ex:
-            logger.error(f"{TAG}: screenshot exception: {ex}")
-            return None
+            raise ScreenshotError(f"screenshot exception: {ex}") from ex
+        finally:
+            # Clean up remote file (best-effort)
+            try:
+                self.execute_shell(f"rm -f {remote_path}", timeout=3)
+            except Exception:
+                pass
+            # Clean up local temp file unless caller asked to keep it
+            if not save_path and local_path and os.path.exists(local_path):
+                try:
+                    os.remove(local_path)
+                except Exception:
+                    pass
 
     # ---- layout dump ----
 

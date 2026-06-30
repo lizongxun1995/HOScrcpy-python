@@ -11,7 +11,6 @@ Usage:
     cap.stop()
 """
 
-import subprocess
 import threading
 import time
 from hos_scrcpy.core.device import Device
@@ -28,9 +27,7 @@ class ScreenCapture:
         self._running = False
         self._thread: threading.Thread | None = None
         self._proc = None
-        # Register cleanup on exit
-        import atexit
-        atexit.register(self.stop)
+        self._stop_event: threading.Event = threading.Event()
 
     # ---- screenshot polling mode ----
 
@@ -43,6 +40,7 @@ class ScreenCapture:
         """
         if self._running:
             self.stop()
+        self._stop_event.clear()
         self._running = True
         self._thread = threading.Thread(
             target=self._screenshot_loop,
@@ -54,22 +52,29 @@ class ScreenCapture:
 
     def _screenshot_loop(self, on_frame, interval: float):
         failures = 0
-        while self._running:
+        backoff = 1.0
+        while self._running and not self._stop_event.is_set():
             start = time.monotonic()
             try:
                 data = self._device.screenshot()
                 if data and self._running:
                     on_frame(data)
                     failures = 0
+                    backoff = 1.0
             except Exception as ex:
                 failures += 1
-                logger.error(f"{TAG}: screenshot error (#{failures}): {ex}")
-                if failures >= 5:
+                backoff = min(backoff * 2, 30.0)  # exponential backoff cap at 30s
+                logger.warning(f"{TAG}: screenshot error (#{failures}): {ex}")
+                if failures >= 10:
                     logger.error(f"{TAG}: {failures} consecutive failures, stopping")
-                    self._running = False
                     break
             elapsed = time.monotonic() - start
-            time.sleep(max(0.05, interval - elapsed))
+            sleep_time = max(backoff * 0.1, interval - elapsed)
+            # Poll stop_event during sleep so we don't block shutdown
+            for _ in range(int(sleep_time / 0.1)):
+                if self._stop_event.is_set():
+                    return
+                time.sleep(0.1)
 
     # ---- native H.264 stream mode (screenrecord) ----
 
@@ -82,6 +87,7 @@ class ScreenCapture:
         if self._running:
             self.stop()
 
+        self._stop_event.clear()
         self._running = True
         self._thread = threading.Thread(
             target=self._native_loop,
@@ -91,16 +97,18 @@ class ScreenCapture:
         self._thread.start()
 
     def _native_loop(self, on_frame, on_error, on_ready):
-        cmd = (
-            f'hdc -s {self._device.ip}:{self._device.port} '
-            f'-t {self._device.sn} '
-            f'shell "screenrecord --output-format=h264 -"'
-        )
+        import subprocess
+        from hos_scrcpy.core.hdc_client import _find_hdc
+        hdc = _find_hdc() or "hdc"
+        args = [
+            hdc, "-s", f"{self._device.ip}:{self._device.port}",
+            "-t", self._device.sn,
+            "shell", "screenrecord --output-format=h264 -",
+        ]
 
         try:
             proc = subprocess.Popen(
-                cmd,
-                shell=True,
+                args,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
@@ -127,8 +135,7 @@ class ScreenCapture:
                 stderr_done.set()
 
         threading.Thread(target=_read_stderr, daemon=True).start()
-        if not stderr_done.wait(timeout=3):
-            pass  # still initializing, continue
+        stderr_done.wait(timeout=3)
 
         if err_lines and "error" in err_lines[0].lower():
             logger.warning(f"{TAG}: screenrecord stderr: {err_lines[0]}")
@@ -169,7 +176,7 @@ class ScreenCapture:
         codec = av.CodecContext.create("h264", "r")
         buf = b""
 
-        while self._running and proc.poll() is None:
+        while self._running and not self._stop_event.is_set() and proc.poll() is None:
             try:
                 chunk = proc.stdout.read(8192)
                 if not chunk:
@@ -253,24 +260,24 @@ class ScreenCapture:
         if self._running:
             self.stop()
 
+        self._stop_event.clear()
         self._running = True
-        result = start_native_bridge(
+        java_proc = start_native_bridge(
             self._device.sn, self._device.ip, self._device.port,
             wait_ready=wait_ready,
         )
 
-        if result is None:
+        if java_proc is None:
             self._running = False
             return None
 
-        output_proc, java_proc = result
-        self._proc = java_proc  # store for stop() cleanup
+        self._proc = java_proc
         touch = FastTouchController(java_proc)
 
         def _stream_loop():
             try:
-                for jpeg in read_jpeg_frames(output_proc):
-                    if not self._running:
+                for jpeg in read_jpeg_frames(java_proc, stop_event=self._stop_event):
+                    if not self._running or self._stop_event.is_set():
                         break
                     on_frame(jpeg)
             except Exception as ex:
@@ -290,15 +297,18 @@ class ScreenCapture:
 
     def stop(self) -> None:
         self._running = False
-        # Kill captured subprocess ref to unblock stdout reader threads
-        for attr in ('_proc',):
-            p = getattr(self, attr, None)
-            if p:
-                try:
-                    p.kill()
-                    p.wait(timeout=5)
-                except Exception:
-                    pass
+        self._stop_event.set()  # signal all loops to exit
+
+        # Kill captured subprocess to unblock any I/O
+        p = self._proc
+        if p:
+            try:
+                p.kill()
+                p.wait(timeout=5)
+            except Exception:
+                pass
+            self._proc = None
+
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3)
             self._thread = None
@@ -310,6 +320,6 @@ class ScreenCapture:
 
     def __del__(self):
         try:
-            self._running = False
+            self.stop()
         except Exception:
             pass

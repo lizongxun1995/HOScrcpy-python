@@ -130,18 +130,11 @@ class KeyboardController(KeyboardProvider):
 
 
 def _read_clipboard() -> str | None:
-    """Read text from the system clipboard. Cross-platform."""
-    try:
-        import tkinter as tk
-        root = tk.Tk()
-        root.withdraw()
-        text = root.clipboard_get()
-        root.destroy()
-        return text
-    except Exception:
-        pass
+    """Read text from the system clipboard. Cross-platform.
 
-    # Fallback: try platform-specific clipboard tools
+    Tries platform-native tools first, falls back to tkinter as last resort
+    (since tk.Tk() may fail in headless/SSH environments).
+    """
     import subprocess
     import os
     try:
@@ -150,15 +143,27 @@ def _read_clipboard() -> str | None:
                 ["powershell", "-Command", "Get-Clipboard"],
                 capture_output=True, text=True, timeout=5
             )
-            return result.stdout.strip()
+            if result.stdout.strip():
+                return result.stdout.strip()
         else:
             for cmd in [["xclip", "-o", "-selection", "clipboard"], ["pbpaste"]]:
                 try:
                     result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-                    if result.returncode == 0:
+                    if result.returncode == 0 and result.stdout.strip():
                         return result.stdout.strip()
                 except Exception:
                     continue
+    except Exception:
+        pass
+
+    # Last resort: try tkinter (may fail in headless environments)
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        text = root.clipboard_get()
+        root.destroy()
+        return text
     except Exception:
         pass
 

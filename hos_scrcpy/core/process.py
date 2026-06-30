@@ -1,15 +1,21 @@
-"""Subprocess executor with timeout — mirrors Java ProcessExecutor."""
+"""Subprocess executor with timeout — mirrors Java ProcessExecutor.
 
+Accepts command as a list of args (preferred, shell=False) for safety,
+or as a string (shell=True, deprecated).
+"""
+
+import shlex
 import subprocess
 import threading
 from hos_scrcpy.utils.logger import logger
 
 
-def run(cmd: str, timeout: int = 10, cwd: str = None) -> tuple[str, int]:
+def run(cmd: list[str] | str, timeout: int = 10, cwd: str = None) -> tuple[str, int]:
     """Execute a command with timeout and return (output, returncode).
 
     Args:
-        cmd: Full command string to execute.
+        cmd: Command as a list of args (recommended, shell=False).
+             Accepts a plain string too (shell=True, deprecated).
         timeout: Timeout in seconds before process is killed.
         cwd: Optional working directory.
 
@@ -20,10 +26,18 @@ def run(cmd: str, timeout: int = 10, cwd: str = None) -> tuple[str, int]:
     output = []
     returncode = -1
 
+    if isinstance(cmd, str):
+        # String form — uses shell=True (legacy path)
+        args_for_popen: list[str] | str = cmd
+        use_shell = True
+    else:
+        args_for_popen = cmd
+        use_shell = False
+
     try:
         proc = subprocess.Popen(
-            cmd,
-            shell=True,
+            args_for_popen,
+            shell=use_shell,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=cwd,
@@ -53,13 +67,14 @@ def run(cmd: str, timeout: int = 10, cwd: str = None) -> tuple[str, int]:
             except subprocess.TimeoutExpired:
                 proc.terminate()
             returncode = -1
-            logger.debug(f"Process timed out after {timeout}s: {cmd[:80]}...")
+            prefix = cmd if isinstance(cmd, str) else " ".join(cmd)
+            logger.debug(f"Process timed out after {timeout}s: {prefix[:80]}...")
 
         stdout_thread.join(timeout=2)
         stderr_thread.join(timeout=2)
 
     except FileNotFoundError:
-        return (f"ErrorMessage:command not found: {cmd.split()[0]}", 127)
+        return (f"ErrorMessage:command not found: {cmd[0] if isinstance(cmd, list) else cmd.split()[0]}", 127)
     except Exception as ex:
         logger.debug(f"Process execution error: {ex}")
         return (f"ErrorMessage:{ex}", -1)

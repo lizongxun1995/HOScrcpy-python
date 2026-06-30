@@ -12,19 +12,40 @@ import threading
 from hos_scrcpy.utils.logger import logger
 
 TAG = "NativeStream"
-_ACTIVE_PROCS: list = []  # Track all Java subprocesses for cleanup
+
+# ---- global process tracking (thread-safe) ----
+
+_ACTIVE_PROCS: list = []
+_ACTIVE_PROCS_LOCK = threading.Lock()
+
+
+def _register_proc(p):
+    """Register a Java subprocess for atexit cleanup."""
+    with _ACTIVE_PROCS_LOCK:
+        _ACTIVE_PROCS.append(p)
+
+
+def _unregister_proc(p):
+    """Remove a Java subprocess from the tracking list."""
+    with _ACTIVE_PROCS_LOCK:
+        try:
+            _ACTIVE_PROCS.remove(p)
+        except ValueError:
+            pass
 
 
 def _cleanup_procs():
     """Kill all active Java subprocesses on exit."""
-    for p in _ACTIVE_PROCS:
+    with _ACTIVE_PROCS_LOCK:
+        procs = list(_ACTIVE_PROCS)
+        _ACTIVE_PROCS.clear()
+    for p in procs:
         try:
             if p.poll() is None:
                 p.kill()
                 p.wait(timeout=3)
         except Exception:
             pass
-    _ACTIVE_PROCS.clear()
 
 import atexit
 atexit.register(_cleanup_procs)
@@ -37,8 +58,8 @@ def _find_libs_dir():
     """Find the HOScrcpy libs directory containing the JAR files.
 
     Resolution order:
-    1. HOS_SCRCPY_HOME env var → $HOS_SCRCPY_HOME/HOScrcpy/libs
-    2. HOS_SCRCPY_LIBS env var → direct path to libs directory
+    1. HOS_SCRCPY_HOME env var -> $HOS_SCRCPY_HOME/HOScrcpy/libs
+    2. HOS_SCRCPY_LIBS env var -> direct path to libs directory
     3. Package-relative: hos_scrcpy/bridge/libs/
     4. Current working directory fallback
     """
@@ -119,7 +140,7 @@ def _find_java_cached() -> str:
 def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait_ready: bool = True, ready_timeout: float = 35.0):
     """Launch Java StreamBridge for JPEG image streaming.
 
-    Returns (output_proc, java_proc) on success, None if Java unavailable.
+    Returns (java_proc) on success, None if Java unavailable.
     If wait_ready=True, waits for the Java "READY" signal (image channel active).
     Returns None if READY doesn't arrive within ready_timeout seconds.
     """
@@ -127,7 +148,6 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait
     hdc_path = _find_hdc() or "hdc"
     java_path = _find_java_cached()
     classpath = os.path.join(_LIBS_DIR, "*") + os.pathsep + _BRIDGE_DIR
-
 
     java_cmd = [
         java_path, "-cp", classpath, "StreamBridge", sn, ip, str(port), hdc_path,
@@ -141,7 +161,7 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait
             stderr=subprocess.PIPE,
             cwd=_BRIDGE_DIR,
         )
-        _ACTIVE_PROCS.append(java_proc)
+        _register_proc(java_proc)
     except Exception as ex:
         logger.error(f"{TAG}: failed to start java: {ex}")
         return None
@@ -149,7 +169,6 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait
     if wait_ready:
         # Read stderr line-by-line until READY or timeout
         ready_event = threading.Event()
-        java_log = []
 
         def _wait_ready():
             try:
@@ -157,12 +176,11 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait
                     msg = line.decode("utf-8", errors="replace").strip()
                     if msg:
                         logger.info(f"{TAG}: JAVA {msg}")
-                        java_log.append(msg)
                         if "READY" in msg:
                             ready_event.set()
                             break
             except Exception:
-                pass  # stderr closed or read error
+                pass
             # Continue logging remaining stderr (touch commands, warnings)
             for line in java_proc.stderr:
                 msg = line.decode("utf-8", errors="replace").strip()
@@ -178,8 +196,7 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait
                 java_proc.wait(timeout=5)
             except Exception:
                 pass
-            if java_proc in _ACTIVE_PROCS:
-                _ACTIVE_PROCS.remove(java_proc)
+            _unregister_proc(java_proc)
             return None
 
         logger.info(f"{TAG}: Java image stream ready for {sn}")
@@ -194,21 +211,59 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait
 
         logger.info(f"{TAG}: Java image stream started for {sn}")
 
-    return (java_proc, java_proc)
+    return java_proc
 
 
-def read_jpeg_frames(proc: subprocess.Popen):
-    """Read length-prefixed JPEG frames from proc stdout."""
+def _read_exactly(stream, n: int, stop_event: threading.Event = None, timeout: float = 1.0) -> bytes:
+    """Read exactly n bytes from a binary stream, with timeout.
+
+    Returns the bytes if successful, or b'' if stop_event is set or timeout.
+    Uses a polling loop so it can be interrupted via stop_event.
+    """
+    buf = b""
+    deadline = time.monotonic() + timeout
+    while len(buf) < n:
+        if stop_event and stop_event.is_set():
+            return b""
+        if time.monotonic() > deadline:
+            # Partial read -> return what we have (caller checks length)
+            return buf
+        try:
+            chunk = stream.read(min(4096, n - len(buf)))
+            if not chunk:
+                return buf  # EOF
+            buf += chunk
+        except Exception:
+            return buf
+    return buf
+
+
+def read_jpeg_frames(proc: subprocess.Popen, stop_event: threading.Event = None):
+    """Read length-prefixed JPEG frames from proc stdout.
+
+    Args:
+        proc: The Java subprocess.
+        stop_event: Optional threading.Event; when set, the generator
+                    exits on the next read cycle (instead of blocking forever).
+
+    Yields:
+        JPEG bytes for each frame.
+    """
     while proc.poll() is None:
         try:
-            header = proc.stdout.read(4)
+            # Use timed read so stop_event can unblock us
+            header = _read_exactly(proc.stdout, 4, stop_event, timeout=0.5)
+            if stop_event and stop_event.is_set():
+                break
             if len(header) < 4:
                 time.sleep(0.001)
                 continue
             length = struct.unpack(">I", header)[0]
             if length > 10_000_000 or length <= 0:
                 continue
-            data = proc.stdout.read(length)
+            data = _read_exactly(proc.stdout, length, stop_event, timeout=2.0)
+            if stop_event and stop_event.is_set():
+                break
             if len(data) == length and len(data) > 1000:
                 yield data
         except Exception:
