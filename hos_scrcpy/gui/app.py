@@ -460,6 +460,7 @@ class MainWindow(tk.Tk):
         self._keyboard = None
         self._demo_mode = False
         self._frame_ready = threading.Event()
+        self._last_rendered = None
         self._tree_nodes: dict[str, object] = {}  # Treeview iid -> JsonStructure
 
         self._build_ui()
@@ -688,6 +689,7 @@ class MainWindow(tk.Tk):
         self._stream_running = True
         self._frame_count = 0
         self._latest_frame = None
+        self._last_rendered = None
         self._btn_cast.configure(text="Stop Cast", state="normal")
         self._status.configure(text=f"LIVE {self._device} - native stream starting...")
 
@@ -734,21 +736,19 @@ class MainWindow(tk.Tk):
     def _on_frame(self, jpeg: bytes):
         """Called from background thread when a new frame is ready."""
         self._latest_frame = jpeg
-        self._frame_ready.set()
 
     def _render_tick(self):
-        """Main thread: render frames when signaled (event-driven)."""
+        """Main thread: render latest frame at ~60fps."""
         if not self._stream_running:
             return
-        if self._frame_ready.wait(timeout=0.05):
-            self._frame_ready.clear()
-            jpeg = self._latest_frame
-            if jpeg is not None:
-                self._mirror.set_jpeg(jpeg)
-                self._frame_count += 1
-                self._status.configure(
-                    text="LIVE {0} - frame #{1}".format(self._device, self._frame_count)
-                )
+        jpeg = self._latest_frame
+        if jpeg is not None and jpeg is not self._last_rendered:
+            self._last_rendered = jpeg
+            self._mirror.set_jpeg(jpeg)
+            self._frame_count += 1
+            self._status.configure(
+                text="LIVE {0} - frame #{1}".format(self._device, self._frame_count)
+            )
         self._render_timer_id = self.after(16, self._render_tick)
 
     def _stop_cast(self):

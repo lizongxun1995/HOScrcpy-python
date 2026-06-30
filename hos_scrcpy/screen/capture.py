@@ -100,19 +100,26 @@ class ScreenCapture:
             self._fallback_to_screenshots(on_frame, on_error, on_ready)
             return
 
-        import select
-        ready, _, _ = select.select([proc.stderr], [], [], 3)
-        if ready:
-            err_line = proc.stderr.readline()
-            if err_line:
-                err_str = err_line.decode("utf-8", errors="replace").strip()
-                if err_str and "error" in err_str.lower():
-                    logger.warning(f"{TAG}: screenrecord stderr: {err_str}")
-                    proc.kill()
-                    if on_error:
-                        on_error(f"screenrecord: {err_str}")
-                    self._fallback_to_screenshots(on_frame, on_error, on_ready)
-                    return
+        # Check stderr for errors — use thread for cross-platform compatibility
+        err_lines = []
+        def _read_stderr():
+            try:
+                line = proc.stderr.readline()
+                if line:
+                    err_lines.append(line.decode("utf-8", errors="replace").strip())
+            except Exception:
+                pass
+        stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+        stderr_thread.start()
+        stderr_thread.join(timeout=3)
+
+        if err_lines and "error" in err_lines[0].lower():
+            logger.warning(f"{TAG}: screenrecord stderr: {err_lines[0]}")
+            proc.kill()
+            if on_error:
+                on_error(f"screenrecord: {err_lines[0]}")
+            self._fallback_to_screenshots(on_frame, on_error, on_ready)
+            return
 
         logger.info(f"{TAG}: native H.264 stream started")
         if on_ready:

@@ -134,8 +134,12 @@ class HdcClient:
         return self._run(cmd, timeout=timeout)
 
     def execute(self, sn: str, command: str, timeout: int = 10) -> str:
-        """Execute a raw hdc command (not shell)."""
-        safe_command = _shell_escape(command)
+        """Execute a raw hdc command (not shell).
+
+        Note: raw hdc commands go directly to hdc, not through device shell.
+        We only clean dangerous metacharacters, not quote-wrap.
+        """
+        safe_command = self._clean_arg(command)
         cmd = f"{self._base_cmd(sn)} {safe_command}"
         logger.debug(f"Execute [{sn}]: {command}")
         return self._run(cmd, timeout=timeout)
