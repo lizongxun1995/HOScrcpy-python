@@ -94,6 +94,7 @@ class MirrorCanvas(tk.Canvas):
         self._pressing = False
         self._swipe_start = None
         self._render_busy = False
+        self._h264_decoded = 0
 
         self.bind("<Button-1>", self._on_press)
         self.bind("<B1-Motion>", self._on_drag)
@@ -194,7 +195,7 @@ class MirrorCanvas(tk.Canvas):
                 try:
                     frames = self._h264_ctx.decode(packet)
                     for frame in frames:
-                        self._h264_decoded = getattr(self, '_h264_decoded', 0) + 1
+                        self._h264_decoded += 1
                         return frame.to_image()
                 except Exception:
                     continue
@@ -484,7 +485,7 @@ class DemoApp(tk.Tk):
 
         self._keyboard = KeyboardController(dev)
         self._mirror.set_device_size(1080, 2340)
-        self._mirror.show_jpeg(jpeg)
+        self._mirror.show_frame(img)
 
         # 启动投屏流
         self._capture = ScreenCapture(dev)
@@ -502,15 +503,7 @@ class DemoApp(tk.Tk):
         threading.Thread(target=_stream, daemon=True).start()
 
         # 后台状态更新
-        def _status_loop():
-            while self._streaming:
-                import time
-                time.sleep(2)
-                recv = getattr(self, '_frames_recv', 0)
-                dec = getattr(self._mirror, '_h264_decoded', 0)
-                self.after(0, lambda r=recv, d=dec: self._status.configure(
-                    text=f"📡 recv={r} dec={d}"))
-        threading.Thread(target=_status_loop, daemon=True).start()
+
 
     def _disconnect(self):
         self._streaming = False
@@ -520,6 +513,9 @@ class DemoApp(tk.Tk):
         if self._capture:
             self._capture.stop()
             self._capture = None
+        self._frames_recv = 0
+        self._frames_rendered = 0
+
         self._device = None
         self._touch = None
         self._mirror.set_touch(None)
@@ -564,7 +560,7 @@ class DemoApp(tk.Tk):
 
     def _on_frame(self, jpeg: bytes):
         self._latest_frame = jpeg
-        self._frames_recv = getattr(self, '_frames_recv', 0) + 1
+        self._frames_recv += 1
 
     def _render_tick(self):
         if not self._streaming:
@@ -572,15 +568,18 @@ class DemoApp(tk.Tk):
         jpeg = self._latest_frame
         if jpeg and jpeg is not self._last_rendered:
             self._last_rendered = jpeg
-            self._mirror.show_jpeg(jpeg)
+            if not self._mirror._render_busy:
+                self._mirror.show_jpeg(jpeg)
             self._fps_counter += 1
+
+        # 状态栏（每 30 tick）
+        if self._fps_counter % 30 == 0:
             now = time.monotonic()
-            if self._fps_counter % 30 == 0:
-                if self._fps_t0:
-                    fps = 30 / (now - self._fps_t0)
-                    recv = getattr(self, '_frames_recv', 0)
-                    self._status.configure(text=f"📡 recv={recv} {fps:.0f}fps")
-                self._fps_t0 = now
+            if self._fps_t0:
+                fps = 30 / (now - self._fps_t0)
+                self._status.configure(
+                    text=f"📡 recv={self._frames_recv} dec={self._mirror._h264_decoded} {fps:.0f}fps")
+            self._fps_t0 = now
         self._render_timer = self.after(16, self._render_tick)
 
     # ── 按键控制 ──────────────────────────────────────────────────────
