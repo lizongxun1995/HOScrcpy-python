@@ -180,12 +180,13 @@ def _cleanup_stale_procs(sn: str = None):
         pass
 
 
-def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait_ready: bool = True, ready_timeout: float = 35.0):
-    """Launch Java StreamBridge for JPEG image streaming.
+def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710",
+                        wait_ready: bool = True, ready_timeout: float = 35.0,
+                        raw_mode: bool = False):
+    """Launch Java StreamBridge for JPEG or raw H.264 streaming.
 
-    Returns (java_proc) on success, None if Java unavailable.
-    If wait_ready=True, waits for the Java "READY" signal (image channel active).
-    Returns None if READY doesn't arrive within ready_timeout seconds.
+    Args:
+        raw_mode: If True, StreamBridge sends raw H.264 + extradata (--raw flag).
     """
     from hos_scrcpy.core.hdc_client import _find_hdc
     hdc_path = _find_hdc() or "hdc"
@@ -193,8 +194,11 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710", wait
     classpath = os.path.join(_LIBS_DIR, "*") + os.pathsep + _BRIDGE_DIR
 
     java_cmd = [
-        java_path, "-cp", classpath, "StreamBridge", sn, ip, str(port), hdc_path,
+        java_path, "-cp", classpath, "StreamBridge", sn,
     ]
+    if raw_mode:
+        java_cmd.append("--raw")
+    java_cmd += [ip, str(port), hdc_path]
 
     # 启动前清理同设备的残留 Java 进程
     _cleanup_stale_procs(sn)
@@ -284,8 +288,8 @@ def _read_exactly(stream, n: int, stop_event: threading.Event = None, timeout: f
     return buf
 
 
-def read_jpeg_frames(proc: subprocess.Popen, stop_event: threading.Event = None):
-    """Read length-prefixed JPEG frames from proc stdout.
+def read_frames(proc: subprocess.Popen, stop_event: threading.Event = None):
+    """Read length-prefixed frames from proc stdout.
 
     Args:
         proc: The Java subprocess.
@@ -293,7 +297,7 @@ def read_jpeg_frames(proc: subprocess.Popen, stop_event: threading.Event = None)
                     exits on the next read cycle (instead of blocking forever).
 
     Yields:
-        JPEG bytes for each frame.
+        Raw bytes for each frame (H.264 NAL units or JPEG).
     """
     while proc.poll() is None:
         try:

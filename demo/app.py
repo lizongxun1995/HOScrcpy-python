@@ -162,35 +162,43 @@ class MirrorCanvas(tk.Canvas):
             self._render_busy = False
 
     def _feed_h264(self, nal_data: bytes) -> Image.Image | None:
-        """持久的 H.264 解码器，累积 NAL 流输出完整帧。"""
+        """持久的 H.264 解码器，逐帧喂数据，无需缓冲。"""
         try:
             import av
         except ImportError:
             return None
 
-        # 首次调用创建解码器
-        if not hasattr(self, '_h264_ctx'):
-            self._h264_ctx = av.CodecContext.create("h264", "r")
-        if not hasattr(self, '_h264_pending'):
-            self._h264_pending = b""
-
-        # 累积数据
-        self._h264_pending += nal_data
-
-        # 只有累积够了一定数据才尝试解码
-        if len(self._h264_pending) < 50000:
+        # 检测 extradata 标记
+        if len(nal_data) >= 8 and nal_data[:4] == b'\xff\xff\xff\xfe':
+            ext_len = int.from_bytes(nal_data[4:8], 'big')
+            ext = nal_data[8:8+ext_len]
+            if len(ext) == ext_len:
+                self._h264_ctx = av.CodecContext.create("h264", "r")
+                self._h264_ctx.extradata = ext
+                self._h264_ctx.open()
+                print(f"[Demo] H264 extradata set ({ext_len} bytes)")
             return None
 
-        # 一次性解析所有累积数据
+        # 首次调用创建解码器（手动设分辨率避免缺 extradata）
+        if not hasattr(self, '_h264_ctx'):
+            self._h264_ctx = av.CodecContext.create("h264", "r")
+            self._h264_ctx.width = 1280
+            self._h264_ctx.height = 2832
+            self._h264_ctx.pix_fmt = "yuv420p"
+            self._h264_ctx.open()
+
+        # 每帧直接喂给解析器（不缓冲）
         try:
-            packets = self._h264_ctx.parse(self._h264_pending)
-            self._h264_pending = b""  # 已消费
+            packets = self._h264_ctx.parse(nal_data)
             for packet in packets:
-                frames = self._h264_ctx.decode(packet)
-                for frame in frames:
-                    return frame.to_image()
+                try:
+                    frames = self._h264_ctx.decode(packet)
+                    for frame in frames:
+                        self._h264_decoded = getattr(self, '_h264_decoded', 0) + 1
+                        return frame.to_image()
+                except Exception:
+                    continue
         except Exception:
-            # 解析/解码失败，保留数据下次再试
             pass
         return None
 
@@ -408,38 +416,15 @@ class DemoApp(tk.Tk):
     # ── 设备发现 ──────────────────────────────────────────────────────
 
     def _refresh(self):
-        """扫描设备：先扫本地（秒出），后台扫远程。"""
         self._btn_refresh.configure(state="disabled")
         self._status.configure(text="扫描设备...")
 
-        # 第一步：快速扫本地 USB 设备
-        local = Device.list_local()
-        local_names = [str(d) for d in local]
-        self._on_refresh(local_names)
+        def _do():
+            devices = HOSDevice.list_devices()
+            names = [str(d) for d in devices]
+            self.after(0, lambda: self._on_refresh(names))
 
-        # 第二步：后台扫远程设备（可能慢）
-        def _scan_remote():
-            try:
-                from hos_scrcpy.utils.settings import get_remote_ips
-                ips = get_remote_ips()
-                if not ips:
-                    return
-                remote = Device.list_remote(ips)
-                all_devices = local + remote
-                # 去重
-                seen = set()
-                unique = []
-                for d in all_devices:
-                    key = (d.sn, d.ip)
-                    if key not in seen:
-                        seen.add(key)
-                        unique.append(d)
-                names = [str(d) for d in unique]
-                self.after(0, lambda: self._on_refresh(names))
-            except Exception:
-                pass
-
-        threading.Thread(target=_scan_remote, daemon=True).start()
+        threading.Thread(target=_do, daemon=True).start()
 
     def _on_refresh(self, names):
         self._btn_refresh.configure(state="normal")
@@ -515,6 +500,17 @@ class DemoApp(tk.Tk):
                 )
 
         threading.Thread(target=_stream, daemon=True).start()
+
+        # 后台状态更新
+        def _status_loop():
+            while self._streaming:
+                import time
+                time.sleep(2)
+                recv = getattr(self, '_frames_recv', 0)
+                dec = getattr(self._mirror, '_h264_decoded', 0)
+                self.after(0, lambda r=recv, d=dec: self._status.configure(
+                    text=f"📡 recv={r} dec={d}"))
+        threading.Thread(target=_status_loop, daemon=True).start()
 
     def _disconnect(self):
         self._streaming = False

@@ -137,13 +137,28 @@ class ScreenCapture:
         threading.Thread(target=_read_stderr, daemon=True).start()
         stderr_done.wait(timeout=3)
 
-        if err_lines and "error" in err_lines[0].lower():
-            logger.warning(f"{TAG}: screenrecord stderr: {err_lines[0]}")
-            _kill_proc_tree(proc)
+        if err_lines:
+            # 有任何 stderr 输出都说明 screenrecord 有问题
+            first_err = err_lines[0].lower()
+            if "error" in first_err or "not found" in first_err or "failed" in first_err:
+                logger.warning(f"{TAG}: screenrecord failed: {err_lines[0]}")
+                _kill_proc_tree(proc)
+                if on_error:
+                    on_error(f"screenrecord: {err_lines[0]}")
+                self._fallback_to_screenshots(on_frame, on_error, on_ready)
+                return
+
+        # 检查进程是否还活着（如果命令不存在，进程会立即退出）
+        try:
+            proc.wait(timeout=0.5)
+            # 进程已退出 → screenrecord 不可用
+            logger.warning(f"{TAG}: screenrecord exited immediately")
             if on_error:
-                on_error(f"screenrecord: {err_lines[0]}")
+                on_error("screenrecord unavailable")
             self._fallback_to_screenshots(on_frame, on_error, on_ready)
             return
+        except subprocess.TimeoutExpired:
+            pass  # 进程还在运行，正常
 
         # Store for cleanup in stop()
         self._proc = proc
@@ -242,20 +257,18 @@ class ScreenCapture:
 
     # ---- Java StreamBridge mode ----
 
-    def start_java_stream(self, on_frame, wait_ready: bool = False):
-        """Start low-latency JPEG stream via Java StreamBridge subprocess.
-
-        Launches StreamBridge.java which connects to the device via the
-        hdc SDK, captures JPEG frames, and relays touch commands via stdin.
+    def start_java_stream(self, on_frame, wait_ready: bool = False,
+                          raw_mode: bool = False):
+        """Start low-latency JPEG or raw H.264 stream via Java StreamBridge.
 
         Args:
-            on_frame: Callback(jpeg_bytes) for each frame.
+            on_frame: Callback(frame_bytes) for each frame.
             wait_ready: If True, blocks until Java READY signal (up to 35s).
-                        Set False for GUI (touch must work immediately).
+            raw_mode: If True, use --raw mode (H.264 + extradata).
 
         Returns a FastTouchController for touch injection, or None on failure.
         """
-        from hos_scrcpy.bridge.native_stream import start_native_bridge, read_jpeg_frames
+        from hos_scrcpy.bridge.native_stream import start_native_bridge, read_frames as read_jpeg_frames
         from hos_scrcpy.input.fast_touch import FastTouchController
 
         if self._running:
@@ -265,7 +278,7 @@ class ScreenCapture:
         self._running = True
         java_proc = start_native_bridge(
             self._device.sn, self._device.ip, self._device.port,
-            wait_ready=wait_ready,
+            wait_ready=wait_ready, raw_mode=raw_mode,
         )
 
         if java_proc is None:
