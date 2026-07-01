@@ -9,6 +9,7 @@ import subprocess
 import struct
 import time
 import threading
+import atexit
 from hos_scrcpy.utils.logger import logger
 
 TAG = "NativeStream"
@@ -57,15 +58,20 @@ def _kill_proc_tree(proc):
             pass
 
 
+_CLEANUP_DONE = False
+
 def _cleanup_procs():
-    """Kill all active Java subprocesses on exit."""
+    """Kill all active Java subprocesses on exit. Idempotent."""
+    global _CLEANUP_DONE
+    if _CLEANUP_DONE:
+        return
+    _CLEANUP_DONE = True
     with _ACTIVE_PROCS_LOCK:
         procs = list(_ACTIVE_PROCS)
         _ACTIVE_PROCS.clear()
     for p in procs:
         _kill_proc_tree(p)
 
-import atexit
 atexit.register(_cleanup_procs)
 _JAVA_EXE = "java.exe" if os.name == "nt" else "java"
 
@@ -228,14 +234,8 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710",
                         logger.info(f"{TAG}: JAVA {msg}")
                         if "READY" in msg:
                             ready_event.set()
-                            break
             except Exception:
                 pass
-            # Continue logging remaining stderr (touch commands, warnings)
-            for line in java_proc.stderr:
-                msg = line.decode("utf-8", errors="replace").strip()
-                if msg:
-                    logger.info(f"{TAG}: JAVA {msg}")
 
         threading.Thread(target=_wait_ready, daemon=True).start()
 

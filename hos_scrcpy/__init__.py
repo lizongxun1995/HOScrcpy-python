@@ -266,9 +266,20 @@ class HOSDevice:
         return self
 
     def __exit__(self, *args):
+        """Context manager exit — clean up all controllers."""
+        for ctrl in ('touch', 'mouse', 'keyboard', 'screen'):
+            obj = getattr(self, ctrl, None)
+            if obj and hasattr(obj, 'stop'):
+                try:
+                    obj.stop()
+                except Exception:
+                    pass
         try:
-            if hasattr(self, 'touch') and hasattr(self.touch, 'stop'):
-                self.touch.stop()
+            self.mouse.stop()
+        except Exception:
+            pass
+        try:
+            self.keyboard.stop()
         except Exception:
             pass
         try:

@@ -310,20 +310,26 @@ class ScreenCapture:
     # ---- lifecycle ----
 
     def stop(self) -> None:
-        self._running = False
-        self._stop_event.set()  # signal all loops to exit
+        """Stop streaming and release resources.
 
-        # Kill captured subprocess tree to unblock any I/O
+        Safe to call multiple times. Does not join daemon threads
+        to avoid deadlock when called from __del__ or GC.
+        """
+        self._running = False
+        self._stop_event.set()
+
+        # Unregister from global process list before killing
         p = self._proc
         if p:
-            from hos_scrcpy.bridge.native_stream import _kill_proc_tree
+            from hos_scrcpy.bridge.native_stream import _kill_proc_tree, _unregister_proc
+            _unregister_proc(p)
             _kill_proc_tree(p)
             self._proc = None
-            self._proc = None
 
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=3)
-            self._thread = None
+        # Do NOT join daemon threads here — __del__ may be called from GC
+        # and joining from the GC thread would deadlock.
+        # Thread will exit on next loop iteration when _running=False.
+        self._thread = None
         logger.info(f"{TAG}: capture stopped")
 
     @property
@@ -331,7 +337,15 @@ class ScreenCapture:
         return self._running
 
     def __del__(self):
+        """Clean shutdown without joining threads.
+
+        Sets the stop event and marks running=False. The actual
+        subprocess kill is handled by atexit cleanup if needed.
+        """
         try:
-            self.stop()
+            self._running = False
+            self._stop_event.set()
+            # Do NOT call self.stop() — that joins threads.
+            # atexit will clean up any orphaned subprocesses.
         except Exception:
             pass

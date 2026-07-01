@@ -79,4 +79,14 @@ class FastTouchController(TouchProvider):
         self.up(x2, y2)
 
     def stop(self):
-        pass
+        """Close stdin pipe and mark as dead."""
+        try:
+            self._dead = True
+            if self._stdin:
+                try:
+                    self._stdin.flush()
+                except Exception:
+                    pass
+                self._stdin.close()
+        except Exception:
+            pass
