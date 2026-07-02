@@ -272,6 +272,37 @@ class DeviceMirror(tk.Frame):
         except Exception as ex:
             logger.debug(f"{TAG}: set_jpeg error: {ex}")
 
+
+    def set_pil_image(self, pil_img):
+        """Render PIL Image directly on canvas - avoids JPEG re-encode.
+
+        Used by H.264 PyAV decode path for zero-copy rendering.
+        """
+        try:
+            cw = self._canvas.winfo_width()
+            ch = self._canvas.winfo_height()
+            if cw < 10 or ch < 10:
+                return
+
+            dw, dh = pil_img.width, pil_img.height
+            self._current_image = pil_img
+            self._device_width = dw
+            self._device_height = dh
+
+            scale = min(cw / dw, ch / dh)
+            new_w, new_h = int(dw * scale), int(dh * scale)
+            resized = pil_img.resize((new_w, new_h), Image.NEAREST)
+
+            self._photo = ImageTk.PhotoImage(resized)
+            if self._image_id is None:
+                self._image_id = self._canvas.create_image(
+                    cw // 2, ch // 2, image=self._photo, anchor=tk.CENTER,
+                )
+            else:
+                self._canvas.itemconfig(self._image_id, image=self._photo)
+        except Exception as ex:
+            logger.debug(f"{TAG}: set_pil_image error: {ex}")
+
     def _redraw(self):
         if self._current_image is None:
             return
@@ -717,7 +748,10 @@ class MainWindow(tk.Tk):
         if hasattr(self, "_conn_timeout"):
             self.after_cancel(self._conn_timeout)
         self._mirror.set_controllers(None, self._keyboard)
-        self._mirror.set_jpeg(jpeg)
+        if isinstance(jpeg, bytes):
+            self._mirror.set_jpeg(jpeg)
+        else:
+            self._mirror.set_pil_image(jpeg)
         self._stream_running = True
         self._frame_count = 0
         self._latest_frame = None
@@ -796,9 +830,9 @@ class MainWindow(tk.Tk):
                                     frames = codec.decode(pkt)
                                     for frame in frames:
                                         img = frame.to_image()
-                                        jpeg_buf = _io.BytesIO()
-                                        img.save(jpeg_buf, format="JPEG", quality=85)
-                                        on_frame(jpeg_buf.getvalue())
+                                        on_frame(img)  # PIL Image, no JPEG encode
+
+
                                 except Exception:
                                     pass
                     except Exception:
@@ -820,7 +854,10 @@ class MainWindow(tk.Tk):
         if jpeg is not None and jpeg is not self._last_rendered:
             self._last_rendered = jpeg
             now = time.monotonic()
-            self._mirror.set_jpeg(jpeg)
+            if isinstance(jpeg, bytes):
+                self._mirror.set_jpeg(jpeg)
+            else:
+                self._mirror.set_pil_image(jpeg)
             self._frame_count += 1
             # Show FPS every 30 frames
             if self._frame_count % 30 == 0:
