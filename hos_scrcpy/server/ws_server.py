@@ -139,7 +139,7 @@ class ScreenServer:
 
         self._keyboard = KeyboardController(self._device)
         self._capture = ScreenCapture(self._device)
-        self._touch = self._capture.start_java_stream(self._on_frame)
+        self._touch = self._capture.start_java_stream(self._on_frame, raw_mode=False)
         if self._touch is None:
             self._capture.start_screenshot_stream(self._on_frame, interval=0.5)
             logger.info(f"{TAG}: screenshot mode (Java unavailable)")
