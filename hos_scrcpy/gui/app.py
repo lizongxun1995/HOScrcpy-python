@@ -474,6 +474,7 @@ class MainWindow(tk.Tk):
         self._capture: ScreenCapture | None = None
         self._stream_running = False
         self._stream_thread: threading.Thread | None = None
+        self._device_map: dict[str, Device] = {}  # label -> Device object
         self._touch = None
         self._keyboard = None
         self._demo_mode = False
@@ -612,7 +613,14 @@ class MainWindow(tk.Tk):
                 devices = []
 
             def _update():
-                items = [str(d) for d in devices]
+                self._device_map.clear()
+                items = []
+                for d in devices:
+                    label = str(d.sn)
+                    if d.is_remote:
+                        label = f"{d.sn} ({d.ip}:{d.port})"
+                    self._device_map[label] = d
+                    items.append(label)
                 self._cmb_device["values"] = items
                 if items:
                     self._cmb_device.current(0)
@@ -647,22 +655,28 @@ class MainWindow(tk.Tk):
             self._start_cast()
 
     def _start_cast(self):
-        sn_str = self._cmb_device.get()
-        if not sn_str:
+        selected = self._cmb_device.get()
+        if not selected:
             messagebox.showwarning("No Device", "Select a device first.")
             return
+
+        # Look up the real Device object from our map
+        d = self._device_map.get(selected)
+        if d is None:
+            # Fallback: try to create from raw SN string
+            try:
+                self._device = Device(selected)
+            except Exception as ex:
+                messagebox.showerror("Error", f"Failed to create device: {ex}")
+                return
+        else:
+            self._device = d
 
         self._demo_mode = False
         self._touch = None  # Will be set after native stream starts
 
-        try:
-            self._device = Device(sn_str)
-        except Exception as ex:
-            messagebox.showerror("Error", f"Failed to create device: {ex}")
-            return
-
         self._btn_cast.configure(text="Connecting...", state="disabled")
-        self._status.configure(text=f"Checking {sn_str}...")
+        self._status.configure(text=f"Checking {self._device}...")
 
         # Safety timeout: auto-reset if connection hangs > 25s
         self._conn_timeout = self.after(25000, self._on_connect_timeout)
@@ -722,18 +736,78 @@ class MainWindow(tk.Tk):
         self._stream_thread.start()
 
     def _stream_loop(self):
-        """Background: start Java video stream with uitest auto-restart."""
-        self._touch = self._capture.start_java_stream(self._on_frame, wait_ready=True)
+        """Background: start H.264 video stream with PyAV decode."""
+        self._touch = self._capture.start_java_stream(
+            self._make_h264_on_frame(self._on_frame), wait_ready=True, raw_mode=True
+        )
         if self._touch is not None:
             self._mirror.set_controllers(self._touch, self._keyboard)
             self.after(0, lambda: self._status.configure(
-                text="LIVE {0} - Java stream active".format(self._device)
+                text="LIVE {0} - Java H.264 stream active".format(self._device)
             ))
-        else:
-            messagebox.showwarning("Stream Error",
-                "Failed to start video stream.\n"
-                "Please reboot the device and try again.")
-            self._stop_cast()
+            return
+
+        # Java stream failed - fall back to screenshot polling
+        logger.info(f"{TAG}: Java stream unavailable, falling back to screenshot polling")
+        self.after(0, lambda: self._status.configure(
+            text="LIVE {0} - screenshot mode (Java unavailable)".format(self._device)
+        ))
+        self._capture.start_screenshot_stream(self._on_frame, interval=0.5)
+
+    @staticmethod
+    def _make_h264_on_frame(on_frame):
+        """Build a callback that decodes H.264 NAL units to JPEG via PyAV."""
+        import av
+        import io as _io
+
+        codec = av.CodecContext.create("h264", "r")
+        codec.thread_type = "NONE"  # lower latency
+        buf = b""
+
+        def _on_h264_frame(nal_data: bytes):
+            nonlocal buf
+            try:
+                buf += nal_data
+                if len(buf) > 8_000_000:
+                    buf = buf[-2_000_000:]
+
+                # Split NAL units by start codes
+                while True:
+                    idx4 = buf.find(b"\x00\x00\x00\x01", 4)
+                    idx3 = buf.find(b"\x00\x00\x01", 4)
+                    pos = -1
+                    if idx4 >= 0 and (idx3 < 0 or idx4 < idx3):
+                        pos = idx4
+                    elif idx3 >= 0:
+                        pos = idx3
+                    if pos <= 0:
+                        break
+
+                    nal = buf[:pos]
+                    buf = buf[pos:]
+                    if len(nal) < 4:
+                        continue
+
+                    try:
+                        packets = codec.parse(nal)
+                        if packets:
+                            for pkt in packets:
+                                try:
+                                    frames = codec.decode(pkt)
+                                    for frame in frames:
+                                        img = frame.to_image()
+                                        jpeg_buf = _io.BytesIO()
+                                        img.save(jpeg_buf, format="JPEG", quality=85)
+                                        on_frame(jpeg_buf.getvalue())
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        return _on_h264_frame
+
     def _on_frame(self, jpeg: bytes):
         """Called from background thread when a new frame is ready."""
         self._latest_frame = jpeg

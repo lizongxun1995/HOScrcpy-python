@@ -417,7 +417,7 @@ def read_frames(proc: subprocess.Popen, stop_event: threading.Event = None):
             data = _read_exactly(proc.stdout, length, stop_event, timeout=2.0)
             if stop_event and stop_event.is_set():
                 break
-            if len(data) == length and len(data) > 1000:
+            if len(data) == length:
                 yield data
         except Exception:
             break
