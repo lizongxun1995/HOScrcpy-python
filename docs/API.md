@@ -1,5 +1,11 @@
 # HOScrcpy Python API 参考
 
+> **资源管理**：使用 `with dev:` 上下文管理器或显式调用 `dev.stop()` 确保 Java 进程
+> 和屏幕流正确释放。`HOSDevice.__del__` 和 `ScreenCapture.__del__` 提供兜底清理，
+> 但不应依赖 GC。
+
+
+
 ## 目录
 
 - [HOSDevice（统一入口）](#hosdevice)
@@ -16,6 +22,8 @@
 - [XPath 查找](#xpath-查找)
 - [WebSocket 服务器](#websocket-服务器)
 - [Settings（配置）](#settings)
+- [AsyncTouchController（异步触摸）](#asynctouchcontroller)
+- [UIFinder（uiautomator2 风格查找器）](#uifinder)
 - [坐标工具](#坐标工具)
 
 ---
@@ -428,6 +436,83 @@ node.find_all(predicate)       # → list[JsonStructure]
 
 # 序列化
 node.to_dict()                 # → dict
+```
+
+---
+
+## UIFinder（uiautomator2 风格查找器）
+
+便捷的元素查找、点击、等待接口，自动管理 UI dump 缓存。
+
+```python
+from hos_scrcpy import UIFinder
+
+finder = dev.finder  # 通过 HOSDevice 访问
+
+# 通用查找
+finder.find(type="Button", text="OK", clickable=True)     # -> list[JsonStructure]
+finder.find(xpath="//Button[@clickable=true]")            # XPath 查找
+finder.find_first(text="OK")                              # -> JsonStructure | None
+
+# 点击（操作前自动 dump）
+finder.click_by_text("OK")         # -> bool
+finder.click_by_id("submit_btn")   # -> bool
+finder.click_by_xpath("//Button[0]") # -> bool
+finder.click_by_description("返回")  # -> bool
+
+# 存在判断（操作前自动 dump）
+finder.exists_text("OK")           # -> bool
+finder.exists_id("submit_btn")     # -> bool
+finder.exists_xpath("//Button")    # -> bool
+finder.exists_description("返回")  # -> bool
+
+# 等待出现（每 500ms 重新 dump + 查找）
+finder.wait_text("OK", timeout=5)     # -> JsonStructure | None
+finder.wait_id("submit_btn", timeout=3)
+finder.wait_xpath("//Button", timeout=5)
+
+# 获取属性
+finder.get_text_by_id("title")       # -> str | None
+finder.get_text_by_xpath("//Text[0]") # -> str | None
+finder.get_bounds_by_id("btn")       # -> (x, y, w, h) | None
+finder.get_center_by_id("btn")       # -> (cx, cy) | None
+finder.get_bounds_by_text("OK")      # -> (x, y, w, h) | None
+finder.get_center_by_text("OK")      # -> (cx, cy) | None
+
+# 获取完整信息
+finder.get_info_by_id("btn")         # -> dict | None
+finder.get_info_by_text("OK")        # -> dict | None
+finder.get_info_by_xpath("//Button") # -> dict | None
+
+# 计数
+finder.count(text="OK")              # -> int
+finder.count_id("btn")               # -> int
+
+# 手动刷新 UI 树
+finder.dump()                        # -> JsonStructure | None
+```
+
+返回的 info dict 结构：
+```python
+{
+    "type": "Button",
+    "text": "OK",
+    "id": "ok_button",
+    "key": "ok_button",
+    "description": "确认按钮",
+    "bounds": (10, 20, 100, 50),
+    "center": (60, 45),
+    "clickable": True,
+    "scrollable": False,
+    "enabled": True,
+    "focused": False,
+    "visible": True,
+    "long_clickable": False,
+    "selected": False,
+    "bundle": "com.example.app",
+    "hierarchy": "ROOT10,0,1",
+    "z_index": "0",
+}
 ```
 
 ---

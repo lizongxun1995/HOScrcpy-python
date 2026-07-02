@@ -351,6 +351,26 @@ print(HdcClient.is_available())
 - WiFi 连接比 USB 延迟高 50-100ms
 - 截图轮询模式下延迟约 500ms
 
+### 多设备切换 Java 进程残留？
+
+v0.2.0+ 已修复进程生命周期管理：
+- 切换设备时只清理当前设备的残留进程，不影响其他设备
+- `hdc kill` 已移除，改为精确清理转发规则
+- 线程使用 generation ID 防止竞态
+
+```python
+# 安全的多设备切换
+dev1 = HOSDevice.connect("SN_DEVICE_1")
+with dev1:
+    dev1.touch.click(100, 200)
+# dev1 自动清理
+
+dev2 = HOSDevice.connect("SN_DEVICE_2")
+with dev2:
+    dev2.screen.start_java_stream(on_frame)
+# dev2 自动清理，不会影响 dev1
+```
+
 ### 布尔属性误判？
 
 `JsonStructure` 正确解析 `"true"/"false"/"True"/"False"/"TRUE"/"FALSE"/"1"/"0"`。

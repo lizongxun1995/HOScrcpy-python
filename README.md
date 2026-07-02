@@ -13,7 +13,8 @@ HOScrcpy Python API 是对鸿蒙 6.0 设备投屏控制 Java 库（`hosscrcpy-*.
 | 键盘输入 | 按键、文本（含中文）、系统键 | `uinput -K` / `uitest uiInput` |
 | 截图 | 截取设备屏幕 JPEG | `snapshot_display` + `file recv` |
 | UI 层级 | 导出 UI 树并解析为 JSON | `uitest dumpLayout` + `file recv` |
-| 视频流 | 实时投屏到 PC | Java StreamBridge 子进程 或截图轮询 |
+| 视频流 | 实时投屏到 PC（H.264/PyAV 或 JPEG 双模式） | Java StreamBridge 子进程 或截图轮询 |
+| UI 自动化 | uiautomator2 风格查找/点击/等待 | UIFinder + UiSelector + XPath |
 
 ---
 
@@ -447,11 +448,28 @@ touch = cap.start_java_stream(on_frame=jpeg_callback)
 # 截图轮询（回退方案）
 cap.start_screenshot_stream(on_frame, interval=0.5)
 
+# H.264 低延迟模式（需 PyAV: pip install av）
+touch = cap.start_java_stream(on_frame, raw_mode=True)  # <1ms 延迟，60fps
+# JPEG 兼容模式（无需 PyAV）
+touch = cap.start_java_stream(on_frame, raw_mode=False)  # Java 侧解码
+
 # H.264 流（需 PyAV）
 cap.start_native_stream(on_frame, on_error, on_ready)
 
 cap.stop()
 cap.is_streaming → bool
+```
+
+### 8.4a UIFinder（uiautomator2 风格）
+
+```python
+dev.click_by_text("Settings")          # 按文本点击
+dev.exists_text("OK")                  # 判断元素是否存在
+dev.wait_text("加载完成", timeout=10)   # 等待元素出现
+info = dev.get_info_by_id("title")     # 获取元素完整属性
+
+# 或直接访问 finder
+dev.finder.find(type="Button", clickable=True)
 ```
 
 ### 8.5 UIHierarchy + UiSelector
@@ -535,4 +553,5 @@ hos-scrcpy
 - **Java StreamBridge** 需要 JRE 8+ 和 `hosscrcpy-*.jar` 在 classpath
 - **截图/UI dump** 走设备端 `/data/local/tmp/` 临时目录
 - **坐标映射** 假定设备竖屏（portrait），横屏需旋转坐标
-- **H.264 流** 依赖 PyAV，部分设备 screenrecord 不可用
+- **H.264 流** 依赖 PyAV（`pip install av`），部分设备 screenrecord 不可用
+- **资源管理** 推荐使用 `with dev:` 上下文管理器确保 Java 进程正确释放
