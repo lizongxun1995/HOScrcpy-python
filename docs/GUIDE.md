@@ -54,53 +54,189 @@ pip install hos-scrcpy[server]
 
 ## 4. 快速开始
 
-### 4.1 列出设备
+### 4.1 启动 Demo（最简单的方式）
 
-```python
-from hos_scrcpy import HOSDevice
+```bash
+# 图形化投屏 Demo
+python -m demo.app
 
-devices = HOSDevice.list_devices()
-for d in devices:
-    print(d)  # Device(sn=62Q0225B12006304)
+# 指定设备直接连接
+python -m demo.app --sn DEVICE_SN
 ```
 
-### 4.2 连接设备
+Demo 启动后界面包含：
+- **设备列表下拉框**：自动扫描并列出可用设备
+- **连接/断开按钮**：一键连接或断开设备
+- **投屏画布**：实时显示设备画面，支持鼠标触控
+- **设备刷新按钮**：重新扫描设备列表
+- **状态栏**：显示连接状态和帧率
 
-```python
-# USB 连接
-dev = HOSDevice.connect("62Q0225B12006304")
+### 4.2 Demo 连接流程
 
-# 检查状态
-print(dev.is_online())  # True
+```
+点击「连接」
+    │
+    ▼
+扫描设备（HOSDevice.list_devices()）
+    │
+    ▼
+用户选择设备 → _connect_device(sn)
+    │
+    ├── Device(sn) 创建
+    ├── dev.is_online() 在线检查
+    ├── self._mirror.reset_h264_state() 重置解码器
+    ├── ScreenCapture(dev) 创建捕获器
+    └── cap.start_java_stream(on_frame, wait_ready=True)
+         │
+         ├── _restart_hdc() 清理残留转发规则 + 设备端旧文件
+         ├── _cleanup_stale_procs() 杀僵尸 Java 进程
+         ├── _push_scrcpy_library() 预推 scrcpy 库到设备
+         ├── subprocess.Popen(java StreamBridge) 启动 Java 子进程
+         └── 等待 Java READY 信号（最多 35s）
+              │
+              ▼
+         FastTouchController(java_proc) 创建触摸控制器
+              │
+              ▼
+         _stream_loop() 后台线程读取视频帧
+              │
+              ▼
+         _render_tick() 主线程渲染（每 16ms）
 ```
 
-### 4.3 基本操作
+### 4.3 流模式选择
+
+Demo 默认使用 **JPEG 模式**（`raw_mode=False`），无需 PyAV。两种模式对比：
+
+| 模式 | `raw_mode` | 解码位置 | 延迟 | Python 依赖 | 适用 |
+|------|-----------|---------|------|------------|------|
+| JPEG | `False`（默认） | Java 端 FFmpeg → JPEG | ~50ms | 无 | 通用、浏览器 |
+| Raw H.264 | `True` | Python 端 PyAV | ~30ms | `pip install av` | 低延迟 GUI/CV |
 
 ```python
-# 截图
-jpeg = dev.screenshot()
-with open("screen.jpg", "wb") as f:
-    f.write(jpeg)
+# JPEG 模式（默认，推荐）
+touch = cap.start_java_stream(on_frame, raw_mode=False)
 
-# 触摸
-dev.touch.click(500, 300)
-dev.touch.swipe(100, 800, 100, 200, duration=0.5)
-
-# 按键
-dev.keyboard.input_text("Hello 世界")
-dev.keyboard.home()
-dev.keyboard.back()
-
-# UI 层级树
-root = dev.ui.dump()
-for node in root.find_all(lambda n: n.is_clickable):
-    print(f"{node.type}: {node.text} @ {node.center}")
-
-# 清理
-dev.screen.stop()
+# Raw H.264 模式（需 PyAV）
+touch = cap.start_java_stream(on_frame, raw_mode=True)
 ```
 
-### 4.4 上下文管理器（推荐）
+> **注意**：Raw H.264 模式下，SDK 的 SPS/PPS 通过 out-of-band 方式传递，可能不可靠。
+> JPEG 模式由 Java 端 FFmpeg 完整处理 H.264 解码，兼容性更好，推荐作为默认。
+
+### 4.4 视频帧渲染管线
+
+```
+StreamBridge.java (Java 子进程)
+    │
+    │  HosRemoteDevice.startImageScreenCapture(callback)
+    │  每帧回调：FFmpeg 解码 H.264 → JPEG 编码 → stdout
+    │
+    ▼
+read_frames(proc)  (Python 后台线程)
+    │
+    │  读取 [4字节大端长度][JPEG数据]
+    │  yield JPEG bytes
+    │
+    ▼
+_on_frame(jpeg_bytes)  (回调)
+    │
+    ├── self._latest_frame = jpeg_bytes  (更新最新帧)
+    └── self._frame_ready.set()          (通知渲染线程)
+         │
+         ▼
+_render_tick()  (主线程，每 16ms)
+    │
+    ├── 读取 self._latest_frame
+    ├── self._mirror.show_jpeg(jpeg)
+    │   ├── Image.open() 解码 JPEG
+    │   └── canvas.create_image() 渲染
+    └── self.after(16, self._render_tick)  (调度下一帧)
+```
+
+### 4.5 触控管线
+
+```
+Canvas 鼠标事件 (tkinter)
+    │
+    ▼
+_on_press / _on_drag / _on_release
+    │
+    ▼
+_canvas_to_device(cx, cy)  坐标变换
+    │  Canvas 坐标 → 设备坐标（考虑缩放+居中偏移）
+    ▼
+FastTouchController
+    │
+    ├── down(x, y)  →  stdin:  "D:544:1953\n"
+    ├── move(x, y)  →  stdin:  "M:548:1973\n"  (限速20/s, <10px跳过)
+    └── up(x, y)    →  stdin:  "U:823:1146\n"
+         │
+         ▼
+StreamBridge.java (touch-reader 线程)
+    │
+    │  BufferedReader.readLine()
+    │  解析 D:/M:/U: 前缀
+    │
+    ▼
+HosRemoteDevice.onTouchDown/Move/Up(x, y)
+    │
+    ▼
+鸿蒙设备
+```
+
+触控协议格式：
+
+| 命令 | 格式 | 含义 |
+|------|------|------|
+| D | `D:x:y` | Touch down |
+| M | `M:x:y` | Touch move |
+| U | `U:x:y` | Touch up |
+
+### 4.6 坐标变换
+
+```
+Canvas 坐标 (event.x, event.y)
+    │
+    ▼ _canvas_to_device()
+图片坐标（去掉缩放+居中偏移）
+    │
+    ▼ 按比例映射
+设备坐标（实际屏幕分辨率，如 1280×2832）
+```
+
+```python
+def _canvas_to_device(self, cx, cy):
+    cw, ch = self._mirror.winfo_width(), self._mirror.winfo_height()
+    iw, ih = self._mirror._img.width, self._mirror._img.height
+    
+    # 1. 计算缩放和居中偏移
+    scale = min(cw / iw, ch / ih)
+    ox = (cw - iw * scale) / 2
+    oy = (ch - ih * scale) / 2
+    
+    # 2. Canvas 坐标 → 图片坐标
+    dx = int((cx - ox) / scale)
+    dy = int((cy - oy) / scale)
+    
+    # 3. 图片坐标 → 设备坐标
+    dx = int(dx * self._mirror._dev_w / iw)
+    dy = int(dy * self._mirror._dev_h / ih)
+    
+    return max(0, min(dx, self._mirror._dev_w)), max(0, min(dy, self._mirror._dev_h))
+```
+
+### 4.7 Demo 和 GUI 两种入口
+
+项目提供两个 GUI 入口，用途不同：
+
+| 入口 | 命令 | 特点 |
+|------|------|------|
+| Demo App | `python -m demo.app` | 单文件，自包含，适合学习和二次开发 |
+| GUI App | `python -m hos_scrcpy.gui.app` | 模块化，带 UI 层级树，适合日常使用 |
+
+Demo App (`demo/app.py`) 是单文件实现，所有逻辑内聚，方便理解整个投屏流程。
+GUI App (`hos_scrcpy/gui/app.py`) 使用项目模块化结构，额外提供 UI 层级树查看、XPath 搜索功能。
 
 ```python
 with HOSDevice.connect("SN123456") as dev:
@@ -148,28 +284,80 @@ hdc tconn 192.168.1.100:8710 -remove
 
 ## 6. 视频流
 
-### 6.1 Java StreamBridge（推荐，低延迟）
+### 6.1 Java StreamBridge JPEG 模式（推荐，默认）
+
+Java 端 FFmpeg 完成 H.264 解码 + JPEG 编码，Python 端直接显示 JPEG。
+无需 PyAV，兼容性最好。
 
 ```python
 capture = dev.screen
+
+# JPEG 模式（默认），返回 FastTouchController（低延迟触控）
 touch = capture.start_java_stream(on_frame)
-if touch:
-    print("Java 流已启动，触摸延迟 <1ms")
-else:
-    print("Java 不可用，回退截图模式")
-    capture.start_screenshot_stream(on_frame, interval=0.5)
+# 等价于
+touch = capture.start_java_stream(on_frame, raw_mode=False)
+
+def on_frame(jpeg_bytes: bytes):
+    """每帧回调，jpeg_bytes 是完整 JPEG 数据"""
+    with open("frame.jpg", "wb") as f:
+        f.write(jpeg_bytes)
 ```
 
-### 6.2 H.264 screenrecord（需 PyAV）
+**启动流程**：
+1. `_restart_hdc(hdc_path, sn, ip, port)` — 清理端口转发 + 设备端残留进程和库文件
+2. `_cleanup_stale_procs(sn)` — 杀同设备残留 Java 进程
+3. `_push_scrcpy_library(sn, ip, port, hdc_path)` — 预推 scrcpy 库到 `/data/local/tmp/`
+4. `subprocess.Popen(java StreamBridge)` — 启动 Java 子进程
+5. 等待 Java `READY` 信号（最多 35s 超时）
+6. 返回 `FastTouchController(java_proc)` 用于低延迟触控
+
+**Java 端处理**：
+- `HosRemoteDevice.startImageScreenCapture(callback)` 启动截图
+- FFmpeg 解码 H.264 → `javax.imageio.ImageIO` 编码 JPEG
+- stdout 输出 `[4字节大端长度][JPEG数据]`，每帧 `flush()`
+- stdin 接收触控命令 `D:x:y` / `M:x:y` / `U:x:y`
+
+### 6.2 Java StreamBridge Raw H.264 模式（需 PyAV）
+
+Java 端直通原始 H.264 NAL 单元，Python 端 PyAV 软解码。
+延迟更低但 SPS/PPS 传递依赖 SDK 内部行为。
+
+```python
+# Raw H.264 模式（需 pip install av）
+touch = capture.start_java_stream(on_frame, raw_mode=True)
+```
+
+> **已知限制**：SDK 通过 out-of-band 方式传递 SPS/PPS，不一定出现在 `onData` 回调中。
+> 如需使用 Raw 模式，建议搭配 `requestIDRFrame()` 强制编码器输出 SPS+PPS+IDR。
+
+### 6.3 H.264 screenrecord（需 PyAV）
 
 ```python
 capture.start_native_stream(on_frame)
 ```
 
-### 6.3 截图轮询（纯 Python，~2fps）
+通过 `hdc shell screenrecord --output-format=h264 -` 管道输出 H.264 裸流。
+比截图轮询帧率高，但部分设备 `screenrecord` 不可用。
+
+### 6.4 截图轮询（纯 Python，~2fps）
 
 ```python
 capture.start_screenshot_stream(on_frame, interval=0.5)
+```
+
+循环调用 `snapshot_display -f /tmp/screen.jpeg` → `file recv`。
+纯 Python，无 Java 依赖，适用于无 JRE 环境或兜底方案。
+
+### 6.5 流模式选择建议
+
+```
+Java 可用？
+ ├── 是 → start_java_stream(raw_mode=False)  ← 推荐
+ │        ├── 需要低延迟 + 有 PyAV → raw_mode=True
+ │        └── 通用/浏览器 → raw_mode=False
+ └── 否 → PyAV 可用？
+           ├── 是 → start_native_stream()
+           └── 否 → start_screenshot_stream()
 ```
 
 ---
@@ -241,17 +429,65 @@ matches = find_by_xpath(root, "//*[@clickable=true]")
 
 ## 8. GUI Demo
 
+两个 GUI 入口：
+
 ```bash
+# Demo App（单文件，适合学习）
+python -m demo.app
+python -m demo.app --sn DEVICE_SN    # 直接连接指定设备
+
+# GUI App（模块化，带 UI 层级树）
 python -m hos_scrcpy.gui.app
 ```
 
-两种模式：
-- **Demo 模式**（默认）：模拟手机屏幕，点击/拖拽有视觉反馈
-- **Live 模式**：选设备 → Start Cast → 实时投屏，触摸映射到真机
+### 8.1 Demo App 界面功能
 
-功能：
-- 右侧 UI 层级树：Dump UI → 选中节点高亮 → XPath 搜索
-- 工具栏：Power / Home / Back 按钮
+| 组件 | 功能 |
+|------|------|
+| 设备下拉框 | 自动扫描，选择目标设备 |
+| 连接/断开按钮 | 一键连接或断开设备 |
+| 刷新按钮 | 重新扫描设备列表 |
+| 投屏画布 | 实时显示设备画面，鼠标触控 |
+| 状态栏 | 连接状态、帧率统计 |
+
+### 8.2 Demo App 关键类
+
+| 类 | 文件 | 职责 |
+|----|------|------|
+| `DemoApp(tk.Tk)` | `demo/app.py` | 主窗口，设备管理，线程调度 |
+| `MirrorCanvas(tk.Canvas)` | `demo/app.py` | 投屏画布，帧渲染，触控事件 |
+| `ScreenCapture` | `hos_scrcpy/screen/capture.py` | 统一流管理（3 种模式） |
+| `FastTouchController` | `hos_scrcpy/input/fast_touch.py` | Java stdin 协议触控 |
+| `Device` | `hos_scrcpy/core/device.py` | 设备实体（SN、IP、截图等） |
+
+### 8.3 线程模型
+
+```
+主线程 (tkinter)
+  ├── _render_tick()    — 30fps 渲染循环
+  ├── Canvas 事件处理   — 鼠标按下/拖拽/释放
+  └── UI 更新           — 状态栏、按钮状态
+
+后台线程
+  ├── _stream_loop()    — read_frames() → _on_frame() 回调
+  ├── _connect()        — 设备连接 + 在线检查
+  ├── _scan()           — 设备扫描 (_refresh_devices)
+  └── touch-reader      — Java 端 stdin 触控读取
+
+线程安全：
+  - _latest_frame: 后台写，主线程读
+  - _render_busy: 简单的帧跳跃锁
+  - tkinter widget: 仅主线程通过 self.after() 操作
+```
+
+### 8.4 GUI App 额外功能
+
+| 功能 | 说明 |
+|------|------|
+| UI 层级树 | Dump UI → 树形展示 → 选中节点高亮 |
+| XPath 搜索 | 输入 XPath 表达式查找元素 |
+| 工具栏按钮 | Power / Home / Back 快捷操作 |
+| Demo 模式 | 无需设备，生成模拟手机画面 |
 
 ---
 
@@ -270,6 +506,8 @@ python -m hos_scrcpy.server.ws_server --sn SN123456 --port 8765
 
 ## 10. 配置
 
+### 10.1 持久化配置
+
 配置文件位置：`~/.hos-scrcpy/config.json`
 
 ```json
@@ -286,6 +524,64 @@ from hos_scrcpy.utils.settings import *
 
 add_remote_ip("192.168.1.101:8710")
 set_use_video_stream(True)
+```
+
+### 10.2 Java StreamBridge 配置
+
+| 环境变量 | 用途 | 默认值 |
+|----------|------|--------|
+| `JAVA_HOME` | JDK/JRE 安装目录 | — |
+| `HOS_SCRCPY_JAVA` | Java 可执行文件路径 | — |
+| `HOS_SCRCPY_HOME` | HOScrcpy 安装根目录 | — |
+| `HOS_SCRCPY_LIBS` | JAR 库目录（直接路径） | `$HOS_SCRCPY_HOME/HOScrcpy/libs` |
+
+**Java 搜索顺序**：
+1. `$JAVA_HOME/bin/java`（或 `.exe`）
+2. `$HOS_SCRCPY_JAVA`
+3. 系统 `PATH` 中的 `java`
+4. Windows 常见 JDK 安装目录（`C:\Program Files\Microsoft\`, `Eclipse Adoptium`, `Java`, `Android\openjdk`）
+
+**JAR 库搜索顺序**：
+1. `$HOS_SCRCPY_LIBS`
+2. `$HOS_SCRCPY_HOME/HOScrcpy/libs`
+3. 包内 `hos_scrcpy/bridge/libs/`
+4. 开发模式回退：`HOScrcpy-main/HOScrcpy/libs/`
+5. 当前目录 `./libs/`
+
+**StreamBridge 启动命令**（自动构建）：
+```bash
+java -cp "libs/*;bridge_dir" StreamBridge <sn> <ip> <hdc_port> <hdc_path>
+```
+
+**HosRemoteConfig 参数**（`StreamBridge.java` 内设置）：
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| `setImageScaleSize` | 720 | 短边缩放到 720px |
+| `setFrameRate` | 30 | 目标帧率 |
+| `setBitRate` | 4000000 | 4 Mbps 码率 |
+
+### 10.3 进程生命周期
+
+```
+启动时:
+  _restart_hdc()        清理 hdc 端口转发 + 设备端 screen_casting 进程 + 残留 so 文件
+  _cleanup_stale_procs() 杀同设备的残留 Java StreamBridge 进程
+  _push_scrcpy_library() 预推备用 scrcpy 库到设备（可选，跳过则 SDK 自动处理）
+  subprocess.Popen()    启动 Java 子进程
+  注册 atexit 清理      确保进程退出时 Java 子进程被终止
+
+断开时:
+  ScreenCapture.stop()
+    ├── _kill_proc_tree(java_proc)  递归杀 Java 进程树
+    ├── _unregister_proc()          从全局追踪列表移除
+    └── 线程 join(3s)               等待流线程退出
+
+复连时:
+  _connect_device()
+    ├── 已有连接 → _disconnect() 断开旧连接
+    ├── self._mirror.reset_h264_state() 清除解码器状态
+    └── 创建新连接...
 ```
 
 ---
