@@ -55,7 +55,9 @@ public class StreamBridge {
 
         System.err.println("STREAM_MODE sn=" + sn + (rawMode ? " raw" : " jpeg"));
 
+        logTiming("before_new_device");
         device = new HosRemoteDevice(config);
+        logTiming("after_new_device");
         out = System.out;
 
         startCaptureLoop();
@@ -85,14 +87,11 @@ public class StreamBridge {
                     @Override
                     public void onData(ByteBuffer byteBuffer) {
                         try {
+                            byte[] data = byteBuffer.array();
                             int pos = byteBuffer.position();
                             int lim = byteBuffer.limit();
-                            int len = lim - pos;
-                            if (len <= 0) return;
-
-                            byte[] data = byteBuffer.array();
-                            int dataLen = Math.min(len, data.length);
-                            if (dataLen <= 0) return;
+                            int dataLen = lim - pos;
+                            if (dataLen <= 0 || pos + dataLen > data.length) return;
 
                             frameCount++;
                             if (frameCount == 1) {
@@ -106,11 +105,11 @@ public class StreamBridge {
                                 out.write((dataLen >> 16) & 0xFF);
                                 out.write((dataLen >> 8) & 0xFF);
                                 out.write(dataLen & 0xFF);
-                                out.write(data, 0, dataLen);
+                                out.write(data, pos, dataLen);
                                 out.flush();
                             } else {
                                 // ── JPEG 模式：FFmpeg 解码 → JPEG 编码 ──
-                                java.awt.image.BufferedImage img = decodeH264Frame(data, dataLen);
+                                java.awt.image.BufferedImage img = decodeH264Frame(data, pos, dataLen);
                                 if (img != null) {
                                     ByteArrayOutputStream baos = new ByteArrayOutputStream();
                                     javax.imageio.ImageIO.write(img, "JPEG", baos);
@@ -227,25 +226,24 @@ public class StreamBridge {
         }
     }
 
-    private static java.awt.image.BufferedImage decodeH264Frame(byte[] data, int len) {
+    private static java.awt.image.BufferedImage decodeH264Frame(byte[] data, int offset, int len) {
         if (!decoderReady) return null;
-        // (existing decode logic - omitted for brevity, same as before)
         byte[] newBuf = new byte[h264Buf.length + len];
         System.arraycopy(h264Buf, 0, newBuf, 0, h264Buf.length);
-        System.arraycopy(data, 0, newBuf, h264Buf.length, len);
+        System.arraycopy(data, offset, newBuf, h264Buf.length, len);
         h264Buf = newBuf;
 
         try {
             org.bytedeco.ffmpeg.avcodec.AVPacket pkt = new org.bytedeco.ffmpeg.avcodec.AVPacket();
-            int offset = 0;
+            int readOffset = 0;
 
-            while (offset < h264Buf.length) {
+            while (readOffset < h264Buf.length) {
                 org.bytedeco.javacpp.IntPointer pktSize = new org.bytedeco.javacpp.IntPointer(0);
                 org.bytedeco.javacpp.BytePointer pktData = new org.bytedeco.javacpp.BytePointer();
-                int remaining = h264Buf.length - offset;
+                int remaining = h264Buf.length - readOffset;
 
                 byte[] chunk = new byte[remaining];
-                System.arraycopy(h264Buf, offset, chunk, 0, remaining);
+                System.arraycopy(h264Buf, readOffset, chunk, 0, remaining);
                 int consumed = org.bytedeco.ffmpeg.global.avcodec.av_parser_parse2(
                     parser, codecCtx, pktData, pktSize,
                     new org.bytedeco.javacpp.BytePointer(chunk), remaining,
@@ -253,8 +251,11 @@ public class StreamBridge {
                     org.bytedeco.ffmpeg.global.avutil.AV_NOPTS_VALUE,
                     org.bytedeco.ffmpeg.global.avutil.AV_NOPTS_VALUE);
 
-                if (consumed < 0) break;
-                offset += Math.max(consumed, 0);
+                if (consumed < 0) {
+                    System.err.println("DECODE_PARSE_ERR consumed=" + consumed + " offset=" + readOffset + " remaining=" + remaining);
+                    break;
+                }
+                readOffset += Math.max(consumed, 0);
                 if (pktSize.get() <= 0) continue;
 
                 pkt.data(pktData);
@@ -262,10 +263,16 @@ public class StreamBridge {
 
                 int ret = org.bytedeco.ffmpeg.global.avcodec.avcodec_send_packet(codecCtx, pkt);
                 org.bytedeco.ffmpeg.global.avcodec.av_packet_unref(pkt);
-                if (ret < 0) continue;
+                if (ret < 0) {
+                    System.err.println("DECODE_SEND_PACKET_ERR ret=" + ret + " offset=" + readOffset + " buf=" + h264Buf.length);
+                    continue;
+                }
 
                 ret = org.bytedeco.ffmpeg.global.avcodec.avcodec_receive_frame(codecCtx, frame);
-                if (ret < 0) continue;
+                if (ret < 0) {
+                    System.err.println("DECODE_RECV_FRAME_ERR ret=" + ret);
+                    continue;
+                }
 
                 int w = frame.width();
                 int h = frame.height();
@@ -306,17 +313,17 @@ public class StreamBridge {
                     new java.awt.image.BufferedImage(w, h, java.awt.image.BufferedImage.TYPE_3BYTE_BGR);
                 img.getRaster().setDataElements(0, 0, w, h, rgbBytes);
 
-                if (offset > 0) {
-                    byte[] rest = new byte[h264Buf.length - offset];
-                    System.arraycopy(h264Buf, offset, rest, 0, rest.length);
+                if (readOffset > 0) {
+                    byte[] rest = new byte[h264Buf.length - readOffset];
+                    System.arraycopy(h264Buf, readOffset, rest, 0, rest.length);
                     h264Buf = rest;
                 }
                 return img;
             }
 
-            if (offset > 0) {
-                byte[] rest = new byte[h264Buf.length - offset];
-                System.arraycopy(h264Buf, offset, rest, 0, rest.length);
+            if (readOffset > 0) {
+                byte[] rest = new byte[h264Buf.length - readOffset];
+                System.arraycopy(h264Buf, readOffset, rest, 0, rest.length);
                 h264Buf = rest;
             }
         } catch (Exception e) {

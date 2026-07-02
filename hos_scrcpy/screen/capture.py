@@ -289,10 +289,13 @@ class ScreenCapture:
         self._stream_gen += 1  # bump generation to invalidate old threads
         my_gen = self._stream_gen
 
+        t_start = time.monotonic()
+        logger.info(f"{TAG}: start_java_stream begin sn={self._device.sn} raw_mode={raw_mode}")
         java_proc = start_native_bridge(
             self._device.sn, self._device.ip, self._device.port,
             wait_ready=wait_ready, raw_mode=raw_mode,
         )
+        logger.info(f"{TAG}: start_java_stream bridge_ready took {(time.monotonic() - t_start)*1000:.0f}ms")
 
         if java_proc is None:
             self._running = False

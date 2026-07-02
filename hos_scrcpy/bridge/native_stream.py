@@ -221,33 +221,41 @@ def _cleanup_stale_procs(sn: str = None):
 
 
 
-def _restart_hdc(hdc_path: str, sn: str = None):
+def _restart_hdc(hdc_path: str, sn: str = None, ip: str = "127.0.0.1", port: str = "8710"):
     """Clean stale forwarding rules and device-side scrcpy processes.
 
     Only removes port forwarding rules and device-side stale processes.
     Does NOT kill the HDC server itself (preserves other device connections).
     """
     import subprocess as _sp
+    # 构建连接参数：远程设备需要 -s ip:port 和 -t sn
+    conn_args = [hdc_path]
+    if ip not in ("127.0.0.1", "localhost", "::1"):
+        conn_args += ["-s", f"{ip}:{port}"]
+    if sn:
+        conn_args += ["-t", sn]
+
     # 1. Remove stale forwarding rules (fport rm) instead of killing HDC
     if sn:
         try:
-            _sp.run([hdc_path, "-t", sn, "fport", "rm", "tcp:20000", "tcp:8012"],
+            t_fport = time.monotonic()
+            _sp.run(conn_args + ["fport", "rm", "tcp:20000", "tcp:8012"],
                     capture_output=True, timeout=3)
+            logger.info(f"{TAG}: _restart_hdc fport_rm took {(time.monotonic() - t_fport)*1000:.0f}ms")
         except Exception:
             pass
 
-    # 2. Kill stale scrcpy processes on the device
+    # 2. Kill stale scrcpy processes on the device AND remove stale library
     if sn:
         try:
-            _sp.run([hdc_path, "shell",
+            t_shell = time.monotonic()
+            _sp.run(conn_args + ["shell",
                 "for pid in $(pgrep -f 'screen_casting' 2>/dev/null); do "
                 "kill -9 $pid 2>/dev/null; done; "
                 "rm -f /data/local/tmp/libscreen_casting.z.so"],
                 capture_output=True, timeout=5)
+            logger.info(f"{TAG}: _restart_hdc shell_cleanup took {(time.monotonic() - t_shell)*1000:.0f}ms")
         except Exception:
-            pass
-
-
             pass
 
 
@@ -296,9 +304,14 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710",
     Args:
         raw_mode: If True, StreamBridge sends raw H.264 + extradata (--raw flag).
     """
+    t_total = time.monotonic()
     from hos_scrcpy.core.hdc_client import _find_hdc
+    t_find = time.monotonic()
     hdc_path = _find_hdc() or "hdc"
+    logger.info(f"{TAG}: _find_hdc took {(time.monotonic() - t_find)*1000:.0f}ms -> {hdc_path}")
+    t_find_java = time.monotonic()
     java_path = _find_java_cached()
+    logger.info(f"{TAG}: _find_java_cached took {(time.monotonic() - t_find_java)*1000:.0f}ms -> {java_path}")
     classpath = os.path.join(_LIBS_DIR, "*") + os.pathsep + _BRIDGE_DIR
 
     java_cmd = [
@@ -309,14 +322,16 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710",
     java_cmd += [ip, str(port), hdc_path]
 
     # 重启 HDC 服务，清除残留的端口转发规则和设备端 scrcpy 进程
-    _restart_hdc(hdc_path, sn)
+    t_restart = time.monotonic()
+    _restart_hdc(hdc_path, sn, ip, port)
+    logger.info(f"{TAG}: _restart_hdc took {(time.monotonic() - t_restart)*1000:.0f}ms")
 
     # 启动前清理同设备的残留 Java 进程
     t0 = time.monotonic()
     _cleanup_stale_procs(sn)
     logger.info(f"{TAG}: cleanup_stale_procs took {(time.monotonic() - t0)*1000:.0f}ms")
 
-    # 预推备用 scrcpy 库，避免 SDK 第一次失败再重试
+    # 预推备用 scrcpy 库到设备，避免 SDK 首次启动时推送耗时
     _push_scrcpy_library(sn, ip, port, hdc_path)
 
     try:
@@ -363,7 +378,7 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710",
 
         logger.info(f"{TAG}: wait_ready took {(time.monotonic() - wait_t0)*1000:.0f}ms")
 
-        logger.info(f"{TAG}: start_native_bridge total {(time.monotonic() - t0)*1000:.0f}ms")
+        logger.info(f"{TAG}: start_native_bridge total {(time.monotonic() - t_total)*1000:.0f}ms")
 
         logger.info(f"{TAG}: Java image stream ready for {sn}")
     else:
