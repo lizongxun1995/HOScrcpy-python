@@ -28,7 +28,8 @@ class ScreenCapture:
         self._thread: threading.Thread | None = None
         self._proc = None
         self._stop_event: threading.Event = threading.Event()
-
+        self._stop_event: threading.Event = threading.Event()
+        self._stream_gen: int = 0  # generation counter to prevent stale-thread cleanup races
     # ---- screenshot polling mode ----
 
     def start_screenshot_stream(self, on_frame, interval: float = 0.5) -> None:
@@ -257,6 +258,7 @@ class ScreenCapture:
 
     # ---- Java StreamBridge mode ----
 
+
     def start_java_stream(self, on_frame, wait_ready: bool = False,
                           raw_mode: bool = True):
         """Start low-latency JPEG or raw H.264 stream via Java StreamBridge.
@@ -269,7 +271,7 @@ class ScreenCapture:
 
         Returns a FastTouchController for touch injection, or None on failure.
         """
-        # 自动检测 PyAV 是否可用，不可用时回退到 JPEG 模式
+        # Automatically fall back to JPEG mode if PyAV is not installed
         if raw_mode:
             try:
                 import av  # noqa: F401
@@ -284,6 +286,9 @@ class ScreenCapture:
 
         self._stop_event.clear()
         self._running = True
+        self._stream_gen += 1  # bump generation to invalidate old threads
+        my_gen = self._stream_gen
+
         java_proc = start_native_bridge(
             self._device.sn, self._device.ip, self._device.port,
             wait_ready=wait_ready, raw_mode=raw_mode,
@@ -305,7 +310,9 @@ class ScreenCapture:
             except Exception as ex:
                 logger.error(f"{TAG}: java stream error: {ex}")
             finally:
-                self._proc = None
+                # Only cleanup if we are still the current generation
+                if self._stream_gen == my_gen:
+                    self._proc = None
                 try:
                     _kill_proc_tree(java_proc)
                 except Exception:
@@ -317,11 +324,16 @@ class ScreenCapture:
 
     # ---- lifecycle ----
 
-    def stop(self) -> None:
+    # ---- lifecycle ----
+
+    def stop(self, join: bool = True) -> None:
         """Stop streaming and release resources.
 
-        Safe to call multiple times. Does not join daemon threads
-        to avoid deadlock when called from __del__ or GC.
+        Safe to call multiple times.
+
+        Args:
+            join: If True (default), waits for the stream thread to finish.
+                  Set False when called from __del__ to avoid GC deadlock.
         """
         self._running = False
         self._stop_event.set()
@@ -334,10 +346,11 @@ class ScreenCapture:
             _kill_proc_tree(p)
             self._proc = None
 
-        # Do NOT join daemon threads here — __del__ may be called from GC
-        # and joining from the GC thread would deadlock.
-        # Thread will exit on next loop iteration when _running=False.
-        self._thread = None
+        # Join daemon thread in normal path to ensure full cleanup
+        if join and self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3)
+            self._thread = None
+        logger.info(f"{TAG}: capture stopped")
         logger.info(f"{TAG}: capture stopped")
 
     @property
@@ -345,21 +358,12 @@ class ScreenCapture:
         return self._running
 
     def __del__(self):
-        """Finalizer — kills subprocess and cleans up resources.
+        """Finalizer - kills subprocess and cleans up resources.
 
-        Calls stop() to kill the Java process. The daemon threads
-        will not be joined (joining from GC thread would deadlock),
-        but the subprocess is killed immediately.
+        Uses stop(join=False) to avoid deadlock from GC thread.
         """
         try:
-            self._running = False
-            self._stop_event.set()
-            # Kill the subprocess directly (don't join threads)
-            p = self._proc
-            if p:
-                from hos_scrcpy.bridge.native_stream import _kill_proc_tree, _unregister_proc
-                _unregister_proc(p)
-                _kill_proc_tree(p)
-                self._proc = None
+            self.stop(join=False)
         except Exception:
             pass
+

@@ -286,18 +286,36 @@ class HOSDevice:
 
 
 __all__ = [
+    # Unified entry
     "HOSDevice",
+    # Core
     "Device",
     "HdcClient",
+    # Input
     "KeyCode",
     "keycode_for_char",
     "TouchController",
+    "AsyncTouchController",
+    "FastTouchController",
     "MouseController",
     "KeyboardController",
+    # Screen
     "ScreenCapture",
+    # UI
     "UIHierarchy",
     "UiSelector",
     "JsonStructure",
+    "UIFinder",
+    "find_by_xpath",
+    "xpath_for",
+    "xpath_filter",
+    # Bridge
+    "start_native_bridge",
+    "read_frames",
+    # Utilities
+    "parse_bounds",
+    "bounds_to_rectangle",
+    # Errors
     "HOScrcpyError",
     "DeviceOfflineError",
     "ScreenshotError",

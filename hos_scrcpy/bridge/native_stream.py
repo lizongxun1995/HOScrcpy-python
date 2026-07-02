@@ -179,54 +179,64 @@ def _find_java_cached() -> str:
 
 
 def _cleanup_stale_procs(sn: str = None):
-    """Kill any orphaned java/StreamBridge processes from previous runs."""
+    """Kill orphaned StreamBridge processes for the given device SN.
+
+    If sn is None, cleans up ALL stale StreamBridge processes (used at exit).
+    If sn is provided, only kills processes associated with that device.
+    """
     import subprocess as _sp
+    target = sn if sn else "StreamBridge"
+
     if os.name == "nt":
         try:
-            # Windows: use wmic to find java.exe processes with StreamBridge
             result = _sp.run(
                 ["wmic", "process", "where", "name='java.exe'",
                  "get", "ProcessId,CommandLine", "/format:csv"],
                 capture_output=True, text=True, timeout=5,
             )
             for line in result.stdout.splitlines():
-                if "StreamBridge" in line:
+                if "StreamBridge" in line and target in line:
                     parts = line.split(",")
                     if len(parts) >= 2:
                         pid = parts[-1].strip()
                         if pid.isdigit():
+                            logger.info(f"{TAG}: killing stale java[StreamBridge] pid={pid}")
                             _sp.run(["taskkill", "/F", "/T", "/PID", pid],
                                     capture_output=True, timeout=5)
         except Exception:
             pass
     else:
-        # POSIX: use pgrep to find Java StreamBridge processes
         try:
             result = _sp.run(
-                ["pgrep", "-f", "StreamBridge"],
+                ["pgrep", "-f", f"StreamBridge.*{target}"],
                 capture_output=True, text=True, timeout=5,
             )
             for pid in result.stdout.strip().splitlines():
                 if pid.isdigit():
+                    logger.info(f"{TAG}: killing stale java[StreamBridge] pid={pid}")
                     _sp.run(["kill", "-9", pid], capture_output=True, timeout=5)
         except Exception:
             pass
 
 
-def _restart_hdc(hdc_path: str, sn: str = None):
-    """Kill the HDC server and clean stale scrcpy processes on the device.
 
-    Stale gRPC port forwarding and device-side scrcpy processes from
-    previous runs cause the screen capture channel to die after seconds.
+
+def _restart_hdc(hdc_path: str, sn: str = None):
+    """Clean stale forwarding rules and device-side scrcpy processes.
+
+    Only removes port forwarding rules and device-side stale processes.
+    Does NOT kill the HDC server itself (preserves other device connections).
     """
     import subprocess as _sp
-    # 1. 停止 HDC 服务（清除 PC 侧残留转发规则）
-    try:
-        _sp.run([hdc_path, "kill"], capture_output=True, timeout=5)
-    except Exception:
-        pass
+    # 1. Remove stale forwarding rules (fport rm) instead of killing HDC
+    if sn:
+        try:
+            _sp.run([hdc_path, "-t", sn, "fport", "rm", "tcp:20000", "tcp:8012"],
+                    capture_output=True, timeout=3)
+        except Exception:
+            pass
 
-    # 2. 杀掉设备上的残留 scrcpy 进程
+    # 2. Kill stale scrcpy processes on the device
     if sn:
         try:
             _sp.run([hdc_path, "shell",
@@ -235,6 +245,9 @@ def _restart_hdc(hdc_path: str, sn: str = None):
                 "rm -f /data/local/tmp/libscreen_casting.z.so"],
                 capture_output=True, timeout=5)
         except Exception:
+            pass
+
+
             pass
 
 
