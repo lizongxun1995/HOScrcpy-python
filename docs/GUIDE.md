@@ -351,6 +351,34 @@ print(HdcClient.is_available())
 - WiFi 连接比 USB 延迟高 50-100ms
 - 截图轮询模式下延迟约 500ms
 
+## 投屏架构对比
+
+项目提供了三种投屏 Demo，架构不同适用场景不同：
+
+### 1. GUI Demo（Python tkinter）
+```
+python -m hos_scrcpy.gui.app
+```
+- **架构**: Java H.264 raw → PyAV 软解码 → PIL Image → tkinter Canvas
+- **特点**: 纯 Python UI，适合桌面控制、自动化测试集成
+- **依赖**: PyAV (`pip install av`)
+- **帧率**: ~50fps
+
+### 2. Python WebSocket 服务器
+```
+python -m hos_scrcpy.server.ws_server --port 8765
+```
+- **架构**: Java JPEG → stdout → Python → WebSocket → 浏览器 `<img>`
+- **特点**: 远程访问，设备控制和投屏在浏览器中完成
+- **依赖**: 无需 PyAV（JPEG 模式）
+- **帧率**: ~40fps
+
+### 3. Java WebSocket Demo（官方）
+位于 `HOScrcpy-main/HOScrcpy-main/web_demo/`
+- **架构**: Java SDK → ByteBuffer → WebSocket → 浏览器 JMuxer.js + `<video>` GPU 硬解
+- **特点**: 零中间环节，最低延迟/最高帧率
+- **帧率**: 60fps
+
 ### 多设备切换 Java 进程残留？
 
 v0.2.0+ 已修复进程生命周期管理：

@@ -20,7 +20,36 @@ HOScrcpy Python API 是对鸿蒙 6.0 设备投屏控制 Java 库（`hosscrcpy-*.
 
 ## 2. 架构设计
 
-### 2.1 双层架构
+### 2.1 总体架构
+
+```
+┌──────────────────────────────────────────────────────┐
+│                    应用层                              │
+│  GUI Demo (tkinter)  │  WS Server  │  Automation      │
+└────────────┬──────────────────────┬───────────────────┘
+             │  Python API (hos_scrcpy)                 │
+             ├──────────────────────────────────────────┤
+             │  HOSDevice 统一入口                       │
+             │  ├─ TouchController / FastTouch          │
+             │  ├─ KeyboardController                   │
+             │  ├─ ScreenCapture (3 种流模式)            │
+             │  └─ UIHierarchy / UIFinder               │
+             ├──────────────┬───────────────────────────┤
+             │              │                           │
+        hdc 子进程    Java StreamBridge 子进程    PyHmDriver
+        (shell cmd)   (H.264/JPEG 视频流)      (纯 Python)
+             │              │                           │
+             └──────────────┴───────────────────────────┘
+                      鸿蒙设备
+```
+
+### 2.2 视频流三种模式
+
+| 模式 | 路径 | 延迟 | 依赖 | 适用场景 |
+|---|---|---|---|---|
+| H.264 raw | Java → PyAV 软解码 → Python | 低 (~30ms) | PyAV | Python 消费 (GUI/自动化/CV) |
+| JPEG | Java → FFmpeg 解码 → JPEG → Python | 中 (~50ms) | 无 | 浏览器消费 |
+| 截图轮询 | hdc shell snapshot_display | 高 (~500ms) | 无 | 无 JRE 环境/兜底 |
 
 ```
 ┌─────────────────────────────────────────────┐
