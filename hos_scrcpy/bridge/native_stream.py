@@ -10,6 +10,7 @@ import struct
 import time
 import threading
 import atexit
+import signal
 from hos_scrcpy.utils.logger import logger
 
 TAG = "NativeStream"
@@ -73,6 +74,22 @@ def _cleanup_procs():
         _kill_proc_tree(p)
 
 atexit.register(_cleanup_procs)
+
+# ---- signal handlers for robust cleanup ----
+
+def _signal_handler(signum, frame):
+    """Signal handler — clean up Java processes on SIGTERM/SIGINT."""
+    _cleanup_procs()
+    # Re-raise the signal to restore default behavior
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+try:
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+except (ValueError, AttributeError):
+    # Not all platforms support signal handlers (e.g., Windows threads)
+    pass
 _JAVA_EXE = "java.exe" if os.name == "nt" else "java"
 
 _BRIDGE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -163,27 +180,99 @@ def _find_java_cached() -> str:
 
 def _cleanup_stale_procs(sn: str = None):
     """Kill any orphaned java/StreamBridge processes from previous runs."""
-    import os
-    if os.name != "nt":
-        return
+    import subprocess as _sp
+    if os.name == "nt":
+        try:
+            # Windows: use wmic to find java.exe processes with StreamBridge
+            result = _sp.run(
+                ["wmic", "process", "where", "name='java.exe'",
+                 "get", "ProcessId,CommandLine", "/format:csv"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                if "StreamBridge" in line:
+                    parts = line.split(",")
+                    if len(parts) >= 2:
+                        pid = parts[-1].strip()
+                        if pid.isdigit():
+                            _sp.run(["taskkill", "/F", "/T", "/PID", pid],
+                                    capture_output=True, timeout=5)
+        except Exception:
+            pass
+    else:
+        # POSIX: use pgrep to find Java StreamBridge processes
+        try:
+            result = _sp.run(
+                ["pgrep", "-f", "StreamBridge"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for pid in result.stdout.strip().splitlines():
+                if pid.isdigit():
+                    _sp.run(["kill", "-9", pid], capture_output=True, timeout=5)
+        except Exception:
+            pass
+
+
+def _restart_hdc(hdc_path: str, sn: str = None):
+    """Kill the HDC server and clean stale scrcpy processes on the device.
+
+    Stale gRPC port forwarding and device-side scrcpy processes from
+    previous runs cause the screen capture channel to die after seconds.
+    """
+    import subprocess as _sp
+    # 1. 停止 HDC 服务（清除 PC 侧残留转发规则）
     try:
-        import subprocess as _sp, re
-        # 用 wmic 获取所有 java.exe 的 PID 和命令行
-        result = _sp.run(
-            ["wmic", "process", "where", "name='java.exe'",
-             "get", "ProcessId,CommandLine", "/format:csv"],
-            capture_output=True, text=True, timeout=5,
-        )
-        for line in result.stdout.splitlines():
-            if "StreamBridge" in line:
-                parts = line.split(",")
-                if len(parts) >= 2:
-                    pid = parts[-1].strip()
-                    if pid.isdigit():
-                        _sp.run(["taskkill", "/F", "/T", "/PID", pid],
-                                capture_output=True, timeout=5)
+        _sp.run([hdc_path, "kill"], capture_output=True, timeout=5)
     except Exception:
         pass
+
+    # 2. 杀掉设备上的残留 scrcpy 进程
+    if sn:
+        try:
+            _sp.run([hdc_path, "shell",
+                "for pid in $(pgrep -f 'screen_casting' 2>/dev/null); do "
+                "kill -9 $pid 2>/dev/null; done; "
+                "rm -f /data/local/tmp/libscreen_casting.z.so"],
+                capture_output=True, timeout=5)
+        except Exception:
+            pass
+
+
+def _push_scrcpy_library(sn: str, ip: str, port: str, hdc_path: str):
+    """Push the correct scrcpy server library to device before starting Java.
+
+    Pre-pushes the alternative scrcpy library so the SDK doesn't need
+    to fail-and-retry. Just overwrites in case the device copy is stale.
+    """
+    import subprocess as _sp
+
+    # 构建 hdc 基础参数
+    base_args = [hdc_path]
+    if ip not in ("127.0.0.1", "localhost", "::1"):
+        base_args += ["-s", f"{ip}:{port}", "-t", sn]
+
+    # 推送备用库（覆盖设备上已有的，确保是最新版本）
+    lib_filename = "libscrcpy_server_unix_6.5-20260313.z.so"
+    lib_path = os.path.join(_BRIDGE_DIR, "scrcpy_server", lib_filename)
+    if not os.path.isfile(lib_path):
+        logger.warning(f"{TAG}: scrcpy library not found at {lib_path}, skipping push")
+        return False
+
+    remote_path = "/data/local/tmp/libscreen_casting.z.so"
+    cmd_push = base_args + ["file", "send", lib_path, remote_path]
+
+    logger.info(f"{TAG}: pushing scrcpy library to {sn}...")
+    t0 = time.monotonic()
+    result = _sp.run(cmd_push, capture_output=True, timeout=15)
+    elapsed = (time.monotonic() - t0) * 1000
+
+    if result.returncode == 0:
+        logger.info(f"{TAG}: pre-pushed scrcpy library ({elapsed:.0f}ms)")
+        return True
+    else:
+        err = result.stderr.decode("utf-8", errors="replace").strip()
+        logger.warning(f"{TAG}: failed to push scrcpy library: {err}")
+        return False
 
 
 def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710",
@@ -206,10 +295,19 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710",
         java_cmd.append("--raw")
     java_cmd += [ip, str(port), hdc_path]
 
+    # 重启 HDC 服务，清除残留的端口转发规则和设备端 scrcpy 进程
+    _restart_hdc(hdc_path, sn)
+
     # 启动前清理同设备的残留 Java 进程
+    t0 = time.monotonic()
     _cleanup_stale_procs(sn)
+    logger.info(f"{TAG}: cleanup_stale_procs took {(time.monotonic() - t0)*1000:.0f}ms")
+
+    # 预推备用 scrcpy 库，避免 SDK 第一次失败再重试
+    _push_scrcpy_library(sn, ip, port, hdc_path)
 
     try:
+        t1 = time.monotonic()
         java_proc = subprocess.Popen(
             java_cmd,
             stdin=subprocess.PIPE,
@@ -218,6 +316,7 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710",
             cwd=_BRIDGE_DIR,
         )
         _register_proc(java_proc)
+        logger.info(f"{TAG}: subprocess.Popen took {(time.monotonic() - t1)*1000:.0f}ms")
     except Exception as ex:
         logger.error(f"{TAG}: failed to start java: {ex}")
         return None
@@ -238,7 +337,7 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710",
                 pass
 
         threading.Thread(target=_wait_ready, daemon=True).start()
-
+        wait_t0 = time.monotonic()
         if not ready_event.wait(timeout=ready_timeout):
             logger.error(f"{TAG}: Java StreamBridge READY timeout after {ready_timeout}s")
             try:
@@ -248,6 +347,10 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710",
                 pass
             _unregister_proc(java_proc)
             return None
+
+        logger.info(f"{TAG}: wait_ready took {(time.monotonic() - wait_t0)*1000:.0f}ms")
+
+        logger.info(f"{TAG}: start_native_bridge total {(time.monotonic() - t0)*1000:.0f}ms")
 
         logger.info(f"{TAG}: Java image stream ready for {sn}")
     else:

@@ -90,3 +90,7 @@ class FastTouchController(TouchProvider):
                 self._stdin.close()
         except Exception:
             pass
+
+    def __del__(self):
+        """Finalizer — ensure stdin is closed."""
+        self.stop()

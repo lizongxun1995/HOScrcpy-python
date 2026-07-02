@@ -258,16 +258,24 @@ class ScreenCapture:
     # ---- Java StreamBridge mode ----
 
     def start_java_stream(self, on_frame, wait_ready: bool = False,
-                          raw_mode: bool = False):
+                          raw_mode: bool = True):
         """Start low-latency JPEG or raw H.264 stream via Java StreamBridge.
 
         Args:
             on_frame: Callback(frame_bytes) for each frame.
             wait_ready: If True, blocks until Java READY signal (up to 35s).
-            raw_mode: If True, use --raw mode (H.264 + extradata).
+            raw_mode: If True, use --raw mode (raw H.264, requires PyAV).
+                      If False, use JPEG mode (Java-side decode, no PyAV needed).
 
         Returns a FastTouchController for touch injection, or None on failure.
         """
+        # 自动检测 PyAV 是否可用，不可用时回退到 JPEG 模式
+        if raw_mode:
+            try:
+                import av  # noqa: F401
+            except ImportError:
+                logger.warning(f"{TAG}: PyAV not installed, falling back to JPEG mode")
+                raw_mode = False
         from hos_scrcpy.bridge.native_stream import start_native_bridge, read_frames as read_jpeg_frames
         from hos_scrcpy.input.fast_touch import FastTouchController
 
@@ -337,15 +345,21 @@ class ScreenCapture:
         return self._running
 
     def __del__(self):
-        """Clean shutdown without joining threads.
+        """Finalizer — kills subprocess and cleans up resources.
 
-        Sets the stop event and marks running=False. The actual
-        subprocess kill is handled by atexit cleanup if needed.
+        Calls stop() to kill the Java process. The daemon threads
+        will not be joined (joining from GC thread would deadlock),
+        but the subprocess is killed immediately.
         """
         try:
             self._running = False
             self._stop_event.set()
-            # Do NOT call self.stop() — that joins threads.
-            # atexit will clean up any orphaned subprocesses.
+            # Kill the subprocess directly (don't join threads)
+            p = self._proc
+            if p:
+                from hos_scrcpy.bridge.native_stream import _kill_proc_tree, _unregister_proc
+                _unregister_proc(p)
+                _kill_proc_tree(p)
+                self._proc = None
         except Exception:
             pass

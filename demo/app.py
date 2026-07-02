@@ -310,6 +310,9 @@ class DemoApp(tk.Tk):
         self._render_timer: str | None = None
         self._fps_counter = 0
         self._fps_t0 = 0.0
+        self._frames_recv = 0
+        self._frames_rendered = 0
+        self._connect_start = 0.0
 
         self._build_ui()
 
@@ -454,6 +457,7 @@ class DemoApp(tk.Tk):
         self._stop_demo()
         self._btn_connect.configure(text="连接中...", state="disabled")
         self._status.configure(text=f"连接 {sn}...")
+        self._connect_start = time.monotonic()
 
         def _do():
             try:
@@ -461,11 +465,13 @@ class DemoApp(tk.Tk):
                 if not dev.is_online():
                     self.after(0, lambda: self._on_connect_fail(f"{sn} 离线"))
                     return
-                jpeg = dev.screenshot()
-                if jpeg is None:
-                    self.after(0, lambda: self._on_connect_fail("截图失败"))
+                # 直接启动 Java 投屏流，不再截图
+                cap = ScreenCapture(dev)
+                touch = cap.start_java_stream(self._on_frame, wait_ready=True)
+                if touch is None:
+                    self.after(0, lambda: self._on_connect_fail("投屏流启动失败"))
                     return
-                self.after(0, lambda: self._on_connect_ok(dev, jpeg))
+                self.after(0, lambda: self._on_stream_ready(dev, cap, touch))
             except Exception as ex:
                 self.after(0, lambda e=str(ex): self._on_connect_fail(e))
 
@@ -476,31 +482,19 @@ class DemoApp(tk.Tk):
         self._status.configure(text=f"❌ {msg}")
         messagebox.showerror("连接失败", msg)
 
-    def _on_connect_ok(self, dev: Device, jpeg: bytes):
+    def _on_stream_ready(self, dev, cap, touch):
         self._device = dev
+        self._capture = cap
         self._demo_mode = False
         self._streaming = True
         self._btn_connect.configure(text="断开", state="normal")
-        self._status.configure(text=f"已连接 {dev.sn}")
-
         self._keyboard = KeyboardController(dev)
         self._mirror.set_device_size(1080, 2340)
-        self._mirror.show_frame(img)
-
-        # 启动投屏流
-        self._capture = ScreenCapture(dev)
+        self._mirror.set_touch(touch)
         self._render_timer = self.after(16, self._render_tick)
-
-        def _stream():
-            touch = self._capture.start_java_stream(self._on_frame, wait_ready=True)
-            if touch:
-                self._mirror.set_touch(touch)
-                self.after(
-                    0,
-                    lambda: self._status.configure(text=f"📡 投屏中 {dev.sn}"),
-                )
-
-        threading.Thread(target=_stream, daemon=True).start()
+        elapsed = (time.monotonic() - self._connect_start) * 1000
+        self._status.configure(text=f"📡 投屏中 {dev.sn} ({elapsed:.0f}ms)")
+        print(f"[Demo] stream ready at +{elapsed:.0f}ms")
 
         # 后台状态更新
 
@@ -515,6 +509,7 @@ class DemoApp(tk.Tk):
             self._capture = None
         self._frames_recv = 0
         self._frames_rendered = 0
+        self._connect_start = 0.0
 
         self._device = None
         self._touch = None
@@ -560,6 +555,9 @@ class DemoApp(tk.Tk):
 
     def _on_frame(self, jpeg: bytes):
         self._latest_frame = jpeg
+        if not hasattr(self, '_first_frame_time'):
+            self._first_frame_time = time.monotonic()
+            print(f"[Demo] first frame arrived at +{(self._first_frame_time - self._connect_start)*1000:.0f}ms")
         self._frames_recv += 1
 
     def _render_tick(self):

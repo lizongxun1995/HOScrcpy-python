@@ -246,6 +246,7 @@ class HOSDevice:
     def screen_off(self) -> bool:
         """Turn screen off (idempotent)."""
         from hos_scrcpy.utils.apps import screen_off
+        return screen_off(self._device)
 
     # ---- file transfer ----
 
@@ -267,25 +268,21 @@ class HOSDevice:
 
     def __exit__(self, *args):
         """Context manager exit — clean up all controllers."""
-        for ctrl in ('touch', 'mouse', 'keyboard', 'screen'):
-            obj = getattr(self, ctrl, None)
-            if obj and hasattr(obj, 'stop'):
+        self.stop()
+
+    def stop(self):
+        """Release all resources: stop screen stream, close controllers."""
+        for ctrl_name in ('screen', 'touch', 'mouse', 'keyboard'):
+            ctrl = getattr(self, ctrl_name, None)
+            if ctrl and hasattr(ctrl, 'stop'):
                 try:
-                    obj.stop()
+                    ctrl.stop()
                 except Exception:
                     pass
-        try:
-            self.mouse.stop()
-        except Exception:
-            pass
-        try:
-            self.keyboard.stop()
-        except Exception:
-            pass
-        try:
-            self.screen.stop()
-        except Exception:
-            pass
+
+    def __del__(self):
+        """Finalizer — ensures resources are released."""
+        self.stop()
 
 
 __all__ = [
