@@ -101,6 +101,14 @@ class MirrorCanvas(tk.Canvas):
         self.bind("<ButtonRelease-1>", self._on_release)
         self.bind("<Configure>", lambda e: self._redraw())
 
+    def reset_h264_state(self):
+        """Reset H.264 decoder state for reconnection."""
+        for attr in ('_h264_ctx', '_h264_has_extradata'):
+            try:
+                delattr(self, attr)
+            except AttributeError:
+                pass
+
     def set_touch(self, touch):
         self._touch = touch
 
@@ -128,14 +136,19 @@ class MirrorCanvas(tk.Canvas):
             if cw < 10 or ch < 10:
                 return
 
-            # 尝试 JPEG 解码（快速路径）
-            try:
-                img = Image.open(io.BytesIO(jpeg_bytes))
-            except Exception:
-                # JPEG 失败 → H.264 NAL 累积解码
+            # H.264 Annex B 数据直接走解码器，不尝试 JPEG
+            if len(jpeg_bytes) >= 4 and jpeg_bytes[:4] == b'\x00\x00\x00\x01':
                 img = self._feed_h264(jpeg_bytes)
                 if img is None:
                     return
+            else:
+                # 尝试 JPEG 解码（快速路径）
+                try:
+                    img = Image.open(io.BytesIO(jpeg_bytes))
+                except Exception:
+                    img = self._feed_h264(jpeg_bytes)
+                    if img is None:
+                        return
 
             iw, ih = img.width, img.height
             scale = min(cw / iw, ch / ih)
@@ -169,14 +182,32 @@ class MirrorCanvas(tk.Canvas):
         except ImportError:
             return None
 
-        # 检测 extradata 标记
-        if len(nal_data) >= 8 and nal_data[:4] == b'\xff\xff\xff\xfe':
+        # 检测 SPS/PPS NAL 单元（Annex B: 00 00 00 01 67 / 68）
+        if not hasattr(self, '_h264_has_extradata') and len(nal_data) >= 5:
+            is_start = nal_data[:4] == b'\x00\x00\x00\x01'
+            nal_type = nal_data[4] & 0x1F
+            if is_start and nal_type == 7:  # SPS
+                self._h264_ctx = av.CodecContext.create("h264", "r")
+                self._h264_ctx.open()
+                self._h264_has_extradata = True
+                print(f"[Demo] H264 decoder init with SPS+PPS ({len(nal_data)} bytes)")
+                # parse() 提取 NAL 单元，decode() 才会把 SPS/PPS 参数写入 codec
+                for pkt in self._h264_ctx.parse(nal_data):
+                    try:
+                        self._h264_ctx.decode(pkt)
+                    except Exception:
+                        pass
+                return None
+
+        # 检测旧的 extradata 标记（兼容）
+        if not hasattr(self, '_h264_ctx') and len(nal_data) >= 8 and nal_data[:4] == b'\xff\xff\xff\xfe':
             ext_len = int.from_bytes(nal_data[4:8], 'big')
             ext = nal_data[8:8+ext_len]
             if len(ext) == ext_len:
                 self._h264_ctx = av.CodecContext.create("h264", "r")
                 self._h264_ctx.extradata = ext
                 self._h264_ctx.open()
+                self._h264_has_extradata = True
                 print(f"[Demo] H264 extradata set ({ext_len} bytes)")
             return None
 
@@ -187,6 +218,7 @@ class MirrorCanvas(tk.Canvas):
             self._h264_ctx.height = 2832
             self._h264_ctx.pix_fmt = "yuv420p"
             self._h264_ctx.open()
+            print(f"[Demo] H264 decoder fallback (no extradata, hardcoded res)")
 
         # 每帧直接喂给解析器（不缓冲）
         try:
@@ -196,8 +228,12 @@ class MirrorCanvas(tk.Canvas):
                     frames = self._h264_ctx.decode(packet)
                     for frame in frames:
                         self._h264_decoded += 1
+                        if self._h264_decoded <= 2:
+                            print(f"[Demo] H264 decoded frame#{self._h264_decoded}: {frame.width}x{frame.height}")
                         return frame.to_image()
-                except Exception:
+                except Exception as ex:
+                    if self._h264_decoded == 0:
+                        print(f"[Demo] H264 decode err: {ex}")
                     continue
         except Exception:
             pass
@@ -454,6 +490,9 @@ class DemoApp(tk.Tk):
             self._connect_device(sn)
 
     def _connect_device(self, sn: str):
+        # 如果已有连接，先断开
+        if self._device:
+            self._disconnect()
         self._stop_demo()
         self._btn_connect.configure(text="连接中...", state="disabled")
         self._status.configure(text=f"连接 {sn}...")
@@ -466,6 +505,7 @@ class DemoApp(tk.Tk):
                     self.after(0, lambda: self._on_connect_fail(f"{sn} 离线"))
                     return
                 # 直接启动 Java 投屏流，不再截图
+                self._mirror.reset_h264_state()
                 cap = ScreenCapture(dev)
                 touch = cap.start_java_stream(self._on_frame, wait_ready=True)
                 if touch is None:

@@ -249,11 +249,15 @@ def _restart_hdc(hdc_path: str, sn: str = None, ip: str = "127.0.0.1", port: str
     if sn:
         try:
             t_shell = time.monotonic()
+            # 杀残留 screen_casting 进程
             _sp.run(conn_args + ["shell",
-                "for pid in $(pgrep -f 'screen_casting' 2>/dev/null); do "
-                "kill -9 $pid 2>/dev/null; done; "
-                "rm -f /data/local/tmp/libscreen_casting.z.so"],
-                capture_output=True, timeout=5)
+                "for pid in $(pidof screen_casting 2>/dev/null); do "
+                "kill -9 $pid 2>/dev/null; done"],
+                capture_output=True, timeout=3)
+            # 删除残留的 scrcpy 库文件（独立执行，确保生效）
+            result = _sp.run(conn_args + ["shell", "rm -f /data/local/tmp/libscreen_casting.z.so"],
+                    capture_output=True, timeout=3)
+            logger.info(f"{TAG}: _restart_hdc shell_cleanup rm_stderr={result.stderr.decode(errors='replace').strip()}")
             logger.info(f"{TAG}: _restart_hdc shell_cleanup took {(time.monotonic() - t_shell)*1000:.0f}ms")
         except Exception:
             pass
@@ -331,7 +335,8 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710",
     _cleanup_stale_procs(sn)
     logger.info(f"{TAG}: cleanup_stale_procs took {(time.monotonic() - t0)*1000:.0f}ms")
 
-    # 预推备用 scrcpy 库到设备，避免 SDK 首次启动时推送耗时
+    # 预推 scrcpy 库到设备：必须先删旧文件再推新文件
+    # 不预推 → SDK 找不到库 → 跳过 scrcpy 启动 → 没画面
     _push_scrcpy_library(sn, ip, port, hdc_path)
 
     try:
