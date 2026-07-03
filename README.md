@@ -13,7 +13,7 @@ HOScrcpy Python API 是对鸿蒙 6.0 设备投屏控制 Java 库（`hosscrcpy-*.
 | 键盘输入 | 按键、文本（含中文）、系统键 | `uinput -K` / `uitest uiInput` |
 | 截图 | 截取设备屏幕 JPEG | `snapshot_display` + `file recv` |
 | UI 层级 | 导出 UI 树并解析为 JSON | `uitest dumpLayout` + `file recv` |
-| 视频流 | 实时投屏到 PC（H.264/PyAV 或 JPEG 双模式） | Java StreamBridge 子进程 或截图轮询 |
+| 视频流 | 实时投屏到 PC（Raw H.264 默认，JPEG 兼容） | Java StreamBridge 子进程 或截图轮询 |
 | UI 自动化 | uiautomator2 风格查找/点击/等待 | UIFinder + UiSelector + XPath |
 
 ---
@@ -45,11 +45,11 @@ HOScrcpy Python API 是对鸿蒙 6.0 设备投屏控制 Java 库（`hosscrcpy-*.
 
 ### 2.2 视频流三种模式
 
-| 模式 | 路径 | 延迟 | 依赖 | 适用场景 |
+| 模式 | 路径 | 帧率 | 依赖 | 适用场景 |
 |---|---|---|---|---|
-| H.264 raw | Java → PyAV 软解码 → Python | 低 (~30ms) | PyAV | Python 消费 (GUI/自动化/CV) |
-| JPEG | Java → FFmpeg 解码 → JPEG → Python | 中 (~50ms) | 无 | 浏览器消费 |
-| 截图轮询 | hdc shell snapshot_display | 高 (~500ms) | 无 | 无 JRE 环境/兜底 |
+| Raw H.264（**默认**） | Java → PyAV 软解码 → Python | ~30fps | PyAV | GUI/自动化/CV |
+| JPEG（兼容） | Java → FFmpeg 解码 → JPEG → Python | ~15fps | 无 | 浏览器/无 PyAV |
+| 截图轮询 | hdc shell snapshot_display | ~2fps | 无 | 无 JRE 环境/兜底 |
 
 ```
 ┌─────────────────────────────────────────────┐

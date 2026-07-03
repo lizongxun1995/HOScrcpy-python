@@ -106,23 +106,23 @@ Demo 启动后界面包含：
 
 ### 4.3 流模式选择
 
-Demo 默认使用 **JPEG 模式**（`raw_mode=False`），无需 PyAV。两种模式对比：
+Demo 默认使用 **Raw H.264 模式**（`raw_mode=True`，需 PyAV），帧率 ~30fps。两种模式对比：
 
-| 模式 | `raw_mode` | 解码位置 | 延迟 | Python 依赖 | 适用 |
+| 模式 | `raw_mode` | 解码位置 | 帧率 | Python 依赖 | 适用 |
 |------|-----------|---------|------|------------|------|
-| JPEG | `False`（默认） | Java 端 FFmpeg → JPEG | ~50ms | 无 | 通用、浏览器 |
-| Raw H.264 | `True` | Python 端 PyAV | ~30ms | `pip install av` | 低延迟 GUI/CV |
+| Raw H.264 | `True`（**默认**） | Python 端 PyAV | ~30fps | `pip install av` | GUI/CV 低延迟 |
+| JPEG | `False` | Java 端 FFmpeg → JPEG | ~15fps | 无 | 浏览器、无 PyAV |
 
 ```python
-# JPEG 模式（默认，推荐）
-touch = cap.start_java_stream(on_frame, raw_mode=False)
-
-# Raw H.264 模式（需 PyAV）
+# Raw H.264 模式（默认，高帧率）
 touch = cap.start_java_stream(on_frame, raw_mode=True)
+
+# JPEG 兼容模式（无需 PyAV，帧率较低）
+touch = cap.start_java_stream(on_frame, raw_mode=False)
 ```
 
-> **注意**：Raw H.264 模式下，SDK 的 SPS/PPS 通过 out-of-band 方式传递，可能不可靠。
-> JPEG 模式由 Java 端 FFmpeg 完整处理 H.264 解码，兼容性更好，推荐作为默认。
+> **已知限制**：Raw H.264 模式下 Demo 偶有闪屏（`_on_frame` 后台线程调 tkinter 渲染），
+> 不影响库本身使用。库的 `on_frame` 回调是纯数据，无此问题。
 
 ### 4.4 视频帧渲染管线
 
@@ -284,17 +284,55 @@ hdc tconn 192.168.1.100:8710 -remove
 
 ## 6. 视频流
 
-### 6.1 Java StreamBridge JPEG 模式（推荐，默认）
+### 6.1 Java StreamBridge Raw H.264 模式（推荐，默认）
 
-Java 端 FFmpeg 完成 H.264 解码 + JPEG 编码，Python 端直接显示 JPEG。
-无需 PyAV，兼容性最好。
+Java 端直通原始 H.264 Annex B NAL 单元，Python 端 PyAV 软解码。
+帧率 ~30fps，延迟低。
 
 ```python
 capture = dev.screen
 
-# JPEG 模式（默认），返回 FastTouchController（低延迟触控）
-touch = capture.start_java_stream(on_frame)
-# 等价于
+# Raw H.264 模式（默认），需 pip install av
+touch = capture.start_java_stream(on_frame, raw_mode=True)
+
+def on_frame(nal_bytes: bytes):
+    """每帧回调，nal_bytes 是原始 H.264 Annex B 数据"""
+    # 自行用 PyAV 解码
+    import av
+    ctx = av.CodecContext.create("h264", "r")
+    ...
+```
+
+**启动流程**：
+1. `_restart_hdc(hdc_path, sn, ip, port)` — `rm -f` 清理设备端残留库，`fport rm` 清理转发
+2. `_cleanup_stale_procs(sn)` — 杀同设备残留 Java 进程
+3. `_push_scrcpy_library(sn, ip, port, hdc_path)` — 预推 scrcpy 库到设备
+4. `subprocess.Popen(java StreamBridge)` — 启动 Java 子进程
+5. 等待 Java `READY` 信号（最多 35s 超时）
+6. 返回 `FastTouchController(java_proc)` 用于低延迟触控
+
+**Java 端处理**：
+- 创建 `HosRemoteDevice` 后调用 `device.executeShellCommand("rm -f ...")` 清理旧库
+- `HosRemoteDevice.startCaptureScreen(callback)` 启动视频流
+- `onReady` 后调用 `requestIDRFrame()` 强制输出 SPS+PPS+IDR
+- stdout 直通：`[4字节大端长度][原始 H.264 Annex B 数据]`，每帧 `flush()`
+- stdin 接收触控：`D:x:y` / `M:x:y` / `U:x:y`
+- `startTouchReader` 检测 stdin EOF → Python 退出时自动终止 Java 进程
+
+**SPS/PPS 处理**：
+- SDK 第一帧通常为 31 字节纯 SPS+PPS（Annex B `00 00 00 01 67 / 68`）
+- 库只透传原始字节，SPS/PPS 检测由调用方处理
+
+**帧数据完整性**：
+- 每个 `onData` 回调携带完整视频帧（已验证：NAL 类型一致，Annex B 起始码完整）
+- 帧大小 20KB~140KB（取决于画面复杂度），无需拼接
+
+### 6.2 JPEG 兼容模式（无需 PyAV）
+
+Java 端 FFmpeg 完成 H.264 解码 + JPEG 编码，Python 端直接显示 JPEG。
+帧率较低（~15fps），但无需 Python 端解码。
+
+```python
 touch = capture.start_java_stream(on_frame, raw_mode=False)
 
 def on_frame(jpeg_bytes: bytes):
@@ -303,33 +341,6 @@ def on_frame(jpeg_bytes: bytes):
         f.write(jpeg_bytes)
 ```
 
-**启动流程**：
-1. `_restart_hdc(hdc_path, sn, ip, port)` — 清理端口转发 + 设备端残留进程和库文件
-2. `_cleanup_stale_procs(sn)` — 杀同设备残留 Java 进程
-3. `_push_scrcpy_library(sn, ip, port, hdc_path)` — 预推 scrcpy 库到 `/data/local/tmp/`
-4. `subprocess.Popen(java StreamBridge)` — 启动 Java 子进程
-5. 等待 Java `READY` 信号（最多 35s 超时）
-6. 返回 `FastTouchController(java_proc)` 用于低延迟触控
-
-**Java 端处理**：
-- `HosRemoteDevice.startImageScreenCapture(callback)` 启动截图
-- FFmpeg 解码 H.264 → `javax.imageio.ImageIO` 编码 JPEG
-- stdout 输出 `[4字节大端长度][JPEG数据]`，每帧 `flush()`
-- stdin 接收触控命令 `D:x:y` / `M:x:y` / `U:x:y`
-
-### 6.2 Java StreamBridge Raw H.264 模式（需 PyAV）
-
-Java 端直通原始 H.264 NAL 单元，Python 端 PyAV 软解码。
-延迟更低但 SPS/PPS 传递依赖 SDK 内部行为。
-
-```python
-# Raw H.264 模式（需 pip install av）
-touch = capture.start_java_stream(on_frame, raw_mode=True)
-```
-
-> **已知限制**：SDK 通过 out-of-band 方式传递 SPS/PPS，不一定出现在 `onData` 回调中。
-> 如需使用 Raw 模式，建议搭配 `requestIDRFrame()` 强制编码器输出 SPS+PPS+IDR。
-
 ### 6.3 H.264 screenrecord（需 PyAV）
 
 ```python
@@ -337,7 +348,6 @@ capture.start_native_stream(on_frame)
 ```
 
 通过 `hdc shell screenrecord --output-format=h264 -` 管道输出 H.264 裸流。
-比截图轮询帧率高，但部分设备 `screenrecord` 不可用。
 
 ### 6.4 截图轮询（纯 Python，~2fps）
 
@@ -346,15 +356,13 @@ capture.start_screenshot_stream(on_frame, interval=0.5)
 ```
 
 循环调用 `snapshot_display -f /tmp/screen.jpeg` → `file recv`。
-纯 Python，无 Java 依赖，适用于无 JRE 环境或兜底方案。
 
 ### 6.5 流模式选择建议
 
 ```
 Java 可用？
- ├── 是 → start_java_stream(raw_mode=False)  ← 推荐
- │        ├── 需要低延迟 + 有 PyAV → raw_mode=True
- │        └── 通用/浏览器 → raw_mode=False
+ ├── 是 → start_java_stream(raw_mode=True)   ← 推荐（~30fps）
+ │        └── 无 PyAV → raw_mode=False（~15fps JPEG）
  └── 否 → PyAV 可用？
            ├── 是 → start_native_stream()
            └── 否 → start_screenshot_stream()

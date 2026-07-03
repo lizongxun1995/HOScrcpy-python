@@ -365,8 +365,12 @@ public class StreamBridge {
                         case "M": device.onTouchMove(x, y); break;
                     }
                 }
+                // stdin EOF → Python 已退出，Java 自行了断
+                System.err.println("STDIN_EOF parent exited, shutting down");
+                running = false;
             } catch (IOException e) {
                 System.err.println("TOUCH_IOERR:" + e.getMessage());
+                running = false;  // 管道断开 → Python 已退出
             }
         }, "touch-reader").start();
     }
