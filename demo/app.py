@@ -11,6 +11,7 @@
 
 import argparse
 import io
+import queue
 import sys
 import threading
 import time
@@ -362,7 +363,6 @@ class DemoApp(tk.Tk):
         self._streaming = False
         self._demo_mode = True
         self._latest_frame: bytes | None = None
-        self._frame_queue: list = []  # Raw H.264 帧队列
         self._last_rendered: bytes | None = None
         self._render_timer: str | None = None
         self._fps_counter = 0
@@ -620,21 +620,20 @@ class DemoApp(tk.Tk):
             print(f"[Demo] first frame arrived at +{(self._first_frame_time - self._connect_start)*1000:.0f}ms")
         self._frames_recv += 1
         self._latest_frame = jpeg
-        # Raw H.264：立即解码渲染，确保解码器不漏帧
+        # 每帧立即解码渲染，确保解码器不漏帧（不丢帧=不花屏）
         if len(jpeg) >= 4 and jpeg[:4] == b'\x00\x00\x00\x01':
             self._mirror.show_jpeg(jpeg)
+            self._last_rendered = jpeg
 
     def _render_tick(self):
         if not self._streaming:
             return
-        # JPEG 模式：渲染最新帧（Raw H.264 帧已由 _on_frame 处理）
         jpeg = self._latest_frame
         if jpeg and jpeg is not self._last_rendered:
-            if not (len(jpeg) >= 4 and jpeg[:4] == b'\x00\x00\x00\x01'):
-                self._last_rendered = jpeg
-                if not self._mirror._render_busy:
-                    self._mirror.show_jpeg(jpeg)
-                self._fps_counter += 1
+            self._last_rendered = jpeg
+            if not self._mirror._render_busy:
+                self._mirror.show_jpeg(jpeg)
+            self._fps_counter += 1
 
         # 状态栏（每 30 tick）
         if self._fps_counter % 30 == 0:
