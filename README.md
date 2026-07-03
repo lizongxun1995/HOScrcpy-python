@@ -58,7 +58,7 @@ HOScrcpy Python API 是对鸿蒙 6.0 设备投屏控制 Java 库（`hosscrcpy-*.
 │  dev.ui / dev.screenshot()                  │
 ├─────────────────────────────────────────────┤
 │  第二层：Java 子进程 (StreamBridge)           │
-│  低延迟 JPEG 流 + 协议级触摸                  │
+│  低延迟 H.264 raw / JPEG 流 + 协议级触摸       │
 ├─────────────────────────────────────────────┤
 │  第一层：hdc 子进程 (subprocess)             │
 │  uinput 触摸 / snapshot_display 截图 /       │
@@ -97,7 +97,7 @@ hos_scrcpy/
 ├── bridge/
 │   ├── __init__.py      # start_native_bridge, read_jpeg_frames
 │   ├── native_stream.py # Java 子进程管理 + 帧读取
-│   ├── StreamBridge.java# Java 端：JPEG 流 + stdin 触摸中继
+│   ├── StreamBridge.java# Java 端：H.264 raw / JPEG 流 + stdin 触摸中继
 │   └── extract_servers.py # scrcpy ELF 二进制提取工具
 ├── gui/
 │   └── app.py           # tkinter 投屏 GUI（Demo 模式 + Live 模式）
@@ -130,23 +130,22 @@ hos_scrcpy/
                                         鸿蒙设备
 
 
-视频帧流 (Live 模式, IMAGE):
+视频帧流 (Live 模式, Raw H.264 / JPEG):
 
-  StreamBridge.java ──stdout──▶ read_jpeg_frames()
+  StreamBridge.java ──stdout──▶ read_frames()
    (4字节长度前缀                  │
-    + JPEG数据)                   ▼
-                            _on_frame(jpeg)
+    + H.264 Annex B / JPEG)       ▼
+                            _on_frame(bytes)
                                   │
                                   ▼
-                            _latest_frame (共享变量)
-                                  │
-                    threading.Event.set()
+                       Raw: _feed_h264() → PIL Image
+                       JPEG: Image.open()
                                   │
                                   ▼
                             _render_tick() [主线程]
                                   │
                                   ▼
-                            DeviceMirror.set_jpeg()
+                            Canvas 渲染
                                   │
                                   ▼
                             tkinter Canvas
@@ -177,10 +176,13 @@ hos_scrcpy/
 | M | `M:x:y` | Touch move |
 | U | `U:x:y` | Touch up |
 
-**JPEG 帧格式**（stdout 二进制）：
+**帧格式**（stdout 二进制，JPEG / Raw H.264 统一格式）：
 ```
-[0x00 0x00 0xNN 0xNN] [FF D8 ... JPEG data ... FF D9]
+[0x00 0x00 0xNN 0xNN] [帧数据]
    4字节 Big-Endian 长度
+   
+   raw_mode=True:  帧数据 = H.264 Annex B (00 00 00 01 67 SPS+PPS / 65 IDR / 61 非IDR)
+   raw_mode=False: 帧数据 = JPEG (FF D8 ... FF D9)
 ```
 
 ### 3.2 截图轮询模式（回退模式）
@@ -470,17 +472,15 @@ keyboard.paste()                    # Ctrl+V
 ```python
 cap = ScreenCapture(device)
 
-# Java 流（推荐，低延迟）
-touch = cap.start_java_stream(on_frame=jpeg_callback)
-# → 返回 FastTouchController 或 None
+# StreamBridge 流（推荐，默认 Raw H.264 ~30fps，需 pip install av）
+touch = cap.start_java_stream(on_frame)
+# → 返回 FastTouchController（低延迟触控）或 None
 
-# 截图轮询（回退方案）
+# JPEG 兼容模式（无需 PyAV，~15fps）
+touch = cap.start_java_stream(on_frame, raw_mode=False)
+
+# 截图轮询（回退方案，~2fps）
 cap.start_screenshot_stream(on_frame, interval=0.5)
-
-# H.264 低延迟模式（需 PyAV: pip install av）
-touch = cap.start_java_stream(on_frame, raw_mode=True)  # <1ms 延迟，60fps
-# JPEG 兼容模式（无需 PyAV）
-touch = cap.start_java_stream(on_frame, raw_mode=False)  # Java 侧解码
 
 # H.264 流（需 PyAV）
 cap.start_native_stream(on_frame, on_error, on_ready)
