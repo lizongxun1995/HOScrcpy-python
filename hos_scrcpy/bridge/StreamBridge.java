@@ -20,7 +20,6 @@ public class StreamBridge {
     private static volatile long frameCount = 0;
     private static long t0;
     private static boolean rawMode = false;
-    private static byte[] spsPpsBuf = null;  // 缓存第一帧 SPS/PPS，拼到后续帧前面
 
     private static void logTiming(String label) {
         long now = System.currentTimeMillis();
@@ -100,37 +99,11 @@ public class StreamBridge {
                             }
 
                             if (rawMode) {
-                                // ── Raw H.264 模式：SPS/PPS 只拼第一帧，之后直通 ──
-                                byte[] outData;
-                                int outOff, outLen;
-
-                                // 检测纯 SPS/PPS 帧（NAL type 7，小帧 < 200 字节）
-                                if (spsPpsBuf == null && dataLen < 200
-                                    && dataLen >= 5 && (data[pos + 4] & 0x1F) == 7) {
-                                    spsPpsBuf = new byte[dataLen];
-                                    System.arraycopy(data, pos, spsPpsBuf, 0, dataLen);
-                                    logTiming("sps_pps_cached");
-                                    return;
-                                }
-
-                                if (spsPpsBuf != null) {
-                                    outLen = spsPpsBuf.length + dataLen;
-                                    outData = new byte[outLen];
-                                    System.arraycopy(spsPpsBuf, 0, outData, 0, spsPpsBuf.length);
-                                    System.arraycopy(data, pos, outData, spsPpsBuf.length, dataLen);
-                                    outOff = 0;
-                                    spsPpsBuf = null;  // 只用一次
-                                } else {
-                                    outData = data;
-                                    outOff = pos;
-                                    outLen = dataLen;
-                                }
-
-                                out.write((outLen >> 24) & 0xFF);
-                                out.write((outLen >> 16) & 0xFF);
-                                out.write((outLen >> 8) & 0xFF);
-                                out.write(outLen & 0xFF);
-                                out.write(outData, outOff, outLen);
+                                out.write((dataLen >> 24) & 0xFF);
+                                out.write((dataLen >> 16) & 0xFF);
+                                out.write((dataLen >> 8) & 0xFF);
+                                out.write(dataLen & 0xFF);
+                                out.write(data, pos, dataLen);
                                 out.flush();
                             } else {
                                 // ── JPEG 模式：FFmpeg 解码 → JPEG 编码 ──

@@ -260,7 +260,7 @@ class ScreenCapture:
 
 
     def start_java_stream(self, on_frame, wait_ready: bool = False,
-                          raw_mode: bool = False):
+                          raw_mode: bool = True):
         """Start low-latency JPEG or raw H.264 stream via Java StreamBridge.
 
         Args:

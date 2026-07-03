@@ -95,11 +95,34 @@ class MirrorCanvas(tk.Canvas):
         self._swipe_start = None
         self._render_busy = False
         self._h264_decoded = 0
+        self._decoded_img: Image.Image | None = None  # Raw H.264 预解码图片
 
         self.bind("<Button-1>", self._on_press)
         self.bind("<B1-Motion>", self._on_drag)
         self.bind("<ButtonRelease-1>", self._on_release)
         self.bind("<Configure>", lambda e: self._redraw())
+
+    def show_decoded(self, img: Image.Image):
+        """显示已解码的 PIL Image（Raw H.264 模式，主线程调用）"""
+        if self._render_busy:
+            return
+        self._render_busy = True
+        try:
+            cw, ch = self.winfo_width(), self.winfo_height()
+            if cw < 10 or ch < 10:
+                return
+            iw, ih = img.width, img.height
+            scale = min(cw / iw, ch / ih)
+            nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+            resized = img.resize((nw, nh), Image.NEAREST) if (iw, ih) != (nw, nh) else img
+            self._photo = ImageTk.PhotoImage(resized)
+            self._img = resized
+            if self._img_id is None:
+                self._img_id = self.create_image(cw // 2, ch // 2, image=self._photo, anchor=tk.CENTER)
+            else:
+                self.itemconfig(self._img_id, image=self._photo)
+        finally:
+            self._render_busy = False
 
     def reset_h264_state(self):
         """Reset H.264 decoder state for reconnection."""
@@ -121,26 +144,21 @@ class MirrorCanvas(tk.Canvas):
         self._dev_w, self._dev_h = img.width, img.height
         self._redraw()
 
-    def show_jpeg(self, jpeg_bytes: bytes):
-        """帧数据 → 显示。
-
-        支持两种格式：
-        1. JPEG（由 startImageScreenCapture 产生）
-        2. H.264 NAL 单元（由 startCaptureScreen 产生，需 PyAV 解码）
-        """
+    def show_jpeg(self, jpeg_bytes: bytes) -> bool:
+        """帧数据 → 显示。返回 True 表示实际渲染了画面。"""
         if self._render_busy:
-            return
+            return False
         self._render_busy = True
         try:
             cw, ch = self.winfo_width(), self.winfo_height()
             if cw < 10 or ch < 10:
-                return
+                return False
 
             # H.264 Annex B 数据直接走解码器，不尝试 JPEG
             if len(jpeg_bytes) >= 4 and jpeg_bytes[:4] == b'\x00\x00\x00\x01':
                 img = self._feed_h264(jpeg_bytes)
                 if img is None:
-                    return
+                    return False
             else:
                 # 尝试 JPEG 解码（快速路径）
                 try:
@@ -148,7 +166,7 @@ class MirrorCanvas(tk.Canvas):
                 except Exception:
                     img = self._feed_h264(jpeg_bytes)
                     if img is None:
-                        return
+                        return False
 
             iw, ih = img.width, img.height
             scale = min(cw / iw, ch / ih)
@@ -170,8 +188,10 @@ class MirrorCanvas(tk.Canvas):
                 )
             else:
                 self.itemconfig(self._img_id, image=self._photo)
+            return True
         except Exception as ex:
             print(f"[Demo] show_jpeg error: {ex}")
+            return False
         finally:
             self._render_busy = False
 
@@ -342,6 +362,7 @@ class DemoApp(tk.Tk):
         self._streaming = False
         self._demo_mode = True
         self._latest_frame: bytes | None = None
+        self._frame_queue: list = []  # Raw H.264 帧队列
         self._last_rendered: bytes | None = None
         self._render_timer: str | None = None
         self._fps_counter = 0
@@ -594,21 +615,26 @@ class DemoApp(tk.Tk):
     # ── 渲染循环 ──────────────────────────────────────────────────────
 
     def _on_frame(self, jpeg: bytes):
-        self._latest_frame = jpeg
         if not hasattr(self, '_first_frame_time'):
             self._first_frame_time = time.monotonic()
             print(f"[Demo] first frame arrived at +{(self._first_frame_time - self._connect_start)*1000:.0f}ms")
         self._frames_recv += 1
+        self._latest_frame = jpeg
+        # Raw H.264：立即解码渲染，确保解码器不漏帧
+        if len(jpeg) >= 4 and jpeg[:4] == b'\x00\x00\x00\x01':
+            self._mirror.show_jpeg(jpeg)
 
     def _render_tick(self):
         if not self._streaming:
             return
+        # JPEG 模式：渲染最新帧（Raw H.264 帧已由 _on_frame 处理）
         jpeg = self._latest_frame
         if jpeg and jpeg is not self._last_rendered:
-            self._last_rendered = jpeg
-            if not self._mirror._render_busy:
-                self._mirror.show_jpeg(jpeg)
-            self._fps_counter += 1
+            if not (len(jpeg) >= 4 and jpeg[:4] == b'\x00\x00\x00\x01'):
+                self._last_rendered = jpeg
+                if not self._mirror._render_busy:
+                    self._mirror.show_jpeg(jpeg)
+                self._fps_counter += 1
 
         # 状态栏（每 30 tick）
         if self._fps_counter % 30 == 0:
