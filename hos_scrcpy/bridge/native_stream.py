@@ -335,8 +335,8 @@ def start_native_bridge(sn: str, ip: str = "127.0.0.1", port: str = "8710",
     _cleanup_stale_procs(sn)
     logger.info(f"{TAG}: cleanup_stale_procs took {(time.monotonic() - t0)*1000:.0f}ms")
 
-    # 预推 scrcpy 库到设备：必须先删旧文件再推新文件
-    # 不预推 → SDK 找不到库 → 跳过 scrcpy 启动 → 没画面
+    # 预推 scrcpy 库：无预推时 SDK 跳过 scrcpy 启动 → 30s 超时才 fallback，更慢
+    # 预推后 SDK 16s 出首帧（含 gRPC 重试），Java 端 stale 超时已缩短为 5s
     _push_scrcpy_library(sn, ip, port, hdc_path)
 
     try:

@@ -193,7 +193,7 @@ public class StreamBridge {
 
                     if (fCount == lastFrameCount && lastFrameCount >= 0) {
                         staleSeconds += 3;
-                        int timeout = (lastFrameCount == 0) ? 30 : 12;
+                        int timeout = (lastFrameCount == 0) ? 5 : 12;
                         if (staleSeconds >= timeout) {
                             System.err.println("STREAM_STALE no progress for " + staleSeconds + "s, restarting...");
                             break;
