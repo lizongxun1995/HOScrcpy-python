@@ -1,34 +1,20 @@
-# HOScrcpy Python API 使用指南
+# 使用指南
 
-## 1. 简介
+HOScrcpy 是鸿蒙设备投屏控制 Python API。如果还不知道这是干什么的，先看 [README](../README.md)。
 
-HOScrcpy 是鸿蒙设备投屏控制 Python API，封装了 `hdc` 命令行和 `hosscrcpy-*.jar` SDK，提供触摸、键盘、屏幕捕获、UI 层级树等完整控制能力。
-
-### 核心特性
-
-- 触摸/鼠标/键盘注入
-- 实时设备截图
-- 视频流投屏（Java StreamBridge / H.264 screenrecord / 截图轮询）
-- UI 层级树 dump 与 XPath 查找
-- GUI demo（tkinter 投屏窗口）
-- WebSocket 服务器（Web 端远程投屏）
-- WiFi 无线调试
-
----
-
-## 2. 环境要求
+## 环境
 
 | 组件 | 说明 |
 |------|------|
 | Python | >= 3.10 |
 | Pillow | >= 10.0（核心依赖，内置） |
+| grpcio | >= 1.60（核心依赖，内置，gRPC 视频通道） |
 | hdc | HarmonyOS Device Connector（**已内置**于 `hos_scrcpy/toolchains/`） |
-| Java | JRE 8+（可选，视频流低延迟需要） |
-| PyAV | `pip install av`（可选，H.264 screenrecord 模式） |
+| PyAV | `pip install av`（可选，H.264 解码） |
 
 ---
 
-## 3. 安装
+## 安装
 
 ```bash
 # 基础安装
@@ -52,26 +38,18 @@ pip install hos-scrcpy[server]
 
 ---
 
-## 4. 快速开始
+## 快速开始
 
-### 4.1 启动 Demo（最简单的方式）
+启动 Demo（最简单）：
 
 ```bash
-# 图形化投屏 Demo
-python -m demo.app
-
-# 指定设备直接连接
-python -m demo.app --sn DEVICE_SN
+python -m demo.app                    # 自动扫描设备
+python -m demo.app --sn DEVICE_SN     # 直接连指定设备
 ```
 
-Demo 启动后界面包含：
-- **设备列表下拉框**：自动扫描并列出可用设备
-- **连接/断开按钮**：一键连接或断开设备
-- **投屏画布**：实时显示设备画面，支持鼠标触控
-- **设备刷新按钮**：重新扫描设备列表
-- **状态栏**：显示连接状态和帧率
+界面：设备下拉框、连接/断开按钮、投屏画布（鼠标直接操作设备）、状态栏帧率。
 
-### 4.2 Demo 连接流程
+### Demo 连接内部流程
 
 ```
 点击「连接」
@@ -86,75 +64,77 @@ Demo 启动后界面包含：
     ├── dev.is_online() 在线检查
     ├── self._mirror.reset_h264_state() 重置解码器
     ├── ScreenCapture(dev) 创建捕获器
-    └── cap.start_java_stream(on_frame, wait_ready=True)
+    └── cap.start_grpc_stream(on_frame, wait_ready=True)
          │
-         ├── _restart_hdc() 清理残留转发规则 + 设备端旧文件
-         ├── _cleanup_stale_procs() 杀僵尸 Java 进程
-         ├── _push_scrcpy_library() 预推 scrcpy 库到设备
-         ├── subprocess.Popen(java StreamBridge) 启动 Java 子进程
-         └── 等待 Java READY 信号（最多 35s）
+         ├── HosTouchChannel.start() 推 agent.so → 起/复用系统 uitest 守护进程
+         │                        → fport 转发 → 连 JSON socket
+         ├── HosVideoStream.start() md5 核对推 libscreen_casting.z.so
+         │                       → 起扩展守护进程（H.264 gRPC 服务端）
+         │                       → fport 转发 → gRPC onStart 服务端流
+         └── 唤屏 + IDR 催帧等首块（最多 15s）
               │
               ▼
-         FastTouchController(java_proc) 创建触摸控制器
+         FastTouchController(touch_channel) 创建触摸控制器
               │
               ▼
-         _stream_loop() 后台线程读取视频帧
+         _stream_loop() 后台线程读取视频块
               │
               ▼
          _render_tick() 主线程渲染（每 16ms）
 ```
 
-### 4.3 流模式选择
+### 流模式选择
 
-Demo 默认使用 **Raw H.264 模式**（`raw_mode=True`，需 PyAV），帧率 ~30fps。两种模式对比：
+默认走 gRPC Raw H.264（需 PyAV），约 20fps。两种模式对比：
 
-| 模式 | `raw_mode` | 解码位置 | 帧率 | Python 依赖 | 适用 |
-|------|-----------|---------|------|------------|------|
-| Raw H.264 | `True`（**默认**） | Python 端 PyAV | ~30fps | `pip install av` | GUI/CV 低延迟 |
-| JPEG | `False` | Java 端 FFmpeg → JPEG | ~15fps | 无 | 浏览器、无 PyAV |
+| 模式 | `raw_mode` | 解码位置 | 帧率 | 依赖 |
+|------|-----------|---------|------|------|
+| Raw H.264 | `True`（默认） | 消费方 PyAV | ~20fps | `pip install av` |
+| JPEG | `False` | 本库 PyAV | ~20fps | `pip install av` |
 
 ```python
 # Raw H.264 模式（默认，高帧率）
-touch = cap.start_java_stream(on_frame, raw_mode=True)
+touch = cap.start_grpc_stream(on_frame, raw_mode=True)
 
-# JPEG 兼容模式（无需 PyAV，帧率较低）
-touch = cap.start_java_stream(on_frame, raw_mode=False)
+# JPEG 模式（on_frame 直接收 JPEG，方便落盘/转发）
+touch = cap.start_grpc_stream(on_frame, raw_mode=False)
 ```
 
-> **已知限制**：Raw H.264 模式下 Demo 偶有闪屏（`_on_frame` 后台线程调 tkinter 渲染），
-> 不影响库本身使用。库的 `on_frame` 回调是纯数据，无此问题。
+> Raw H.264 模式下 Demo 偶有闪屏，因为后台线程调了 tkinter 渲染。库本身的 `on_frame` 回调没问题。
 
-### 4.4 视频帧渲染管线
+### 视频帧渲染管线
 
 ```
-StreamBridge.java (Java 子进程)
+设备端 uitest 扩展守护进程 (libscreen_casting.z.so)
     │
-    │  HosRemoteDevice.startImageScreenCapture(callback)
-    │  每帧回调：FFmpeg 解码 H.264 → JPEG 编码 → stdout
-    │
+    │  H.264 编码，gRPC ScrcpyService/onStart 服务端流
+    │  每条消息 payload["data"].val_bytes = 一段裸 H.264
+    │  （经 hdc fport 转发到本机随机口）
     ▼
-read_frames(proc)  (Python 后台线程)
+HosVideoStream._recv_loop()  (接收线程)
     │
-    │  读取 [4字节大端长度][JPEG数据]
-    │  yield JPEG bytes
-    │
+    │  块入有界队列（满丢最旧，防反压）
     ▼
-_on_frame(jpeg_bytes)  (回调)
+read_frames(bridge)  (Python 后台线程)
     │
-    ├── self._latest_frame = jpeg_bytes  (更新最新帧)
-    └── self._frame_ready.set()          (通知渲染线程)
+    │  yield H.264 bytes（含停滞看门狗：5s IDR 探活 / 60s 判死）
+    ▼
+_on_frame(chunk)  (回调)
+    │
+    ├── self._latest_frame = chunk  (更新最新帧)
+    └── self._frame_ready.set()     (通知渲染线程)
          │
          ▼
 _render_tick()  (主线程，每 16ms)
     │
     ├── 读取 self._latest_frame
-    ├── self._mirror.show_jpeg(jpeg)
-    │   ├── Image.open() 解码 JPEG
+    ├── self._mirror.show_jpeg(data)
+    │   ├── 数据以 00 00 00 01 开头 → _feed_h264() PyAV 持久解码器
     │   └── canvas.create_image() 渲染
     └── self.after(16, self._render_tick)  (调度下一帧)
 ```
 
-### 4.5 触控管线
+### 触控管线
 
 ```
 Canvas 鼠标事件 (tkinter)
@@ -168,32 +148,28 @@ _canvas_to_device(cx, cy)  坐标变换
     ▼
 FastTouchController
     │
-    ├── down(x, y)  →  stdin:  "D:544:1953\n"
-    ├── move(x, y)  →  stdin:  "M:548:1973\n"  (限速20/s, <10px跳过)
-    └── up(x, y)    →  stdin:  "U:823:1146\n"
+    ├── down(x, y)  →  {"api":"touchDown","args":{"x":544,"y":1953}}
+    ├── move(x, y)  →  {"api":"touchMove","args":{"x":548,"y":1973"}}  (限速20/s, <10px跳过)
+    └── up(x, y)    →  {"api":"touchUp","args":{"x":823,"y":1146}}
          │
          ▼
-StreamBridge.java (touch-reader 线程)
+HosTouchChannel (持久 socket，经 hdc fport 转发)
     │
-    │  BufferedReader.readLine()
-    │  解析 D:/M:/U: 前缀
-    │
+    │  compact JSON: module=com.ohos.devicetest.hypiumApiHelper, method=Gestures
+    │  后台排空线程持续读掉守护进程回复
     ▼
-HosRemoteDevice.onTouchDown/Move/Up(x, y)
-    │
-    ▼
-鸿蒙设备
+鸿蒙设备 (系统 uitest 守护进程注入)
 ```
 
-触控协议格式：
+触控协议格式（Gestures JSON，按 api 字段区分）：
 
-| 命令 | 格式 | 含义 |
-|------|------|------|
-| D | `D:x:y` | Touch down |
-| M | `M:x:y` | Touch move |
-| U | `U:x:y` | Touch up |
+| api | 含义 |
+|-----|------|
+| `touchDown` | Touch down |
+| `touchMove` | Touch move |
+| `touchUp` | Touch up |
 
-### 4.6 坐标变换
+### 坐标变换
 
 ```
 Canvas 坐标 (event.x, event.y)
@@ -226,17 +202,16 @@ def _canvas_to_device(self, cx, cy):
     return max(0, min(dx, self._mirror._dev_w)), max(0, min(dy, self._mirror._dev_h))
 ```
 
-### 4.7 Demo 和 GUI 两种入口
+### Demo 和 GUI 两种入口
 
-项目提供两个 GUI 入口，用途不同：
+两个 GUI 入口，用途不同：
 
-| 入口 | 命令 | 特点 |
+| 入口 | 命令 | 适合 |
 |------|------|------|
-| Demo App | `python -m demo.app` | 单文件，自包含，适合学习和二次开发 |
-| GUI App | `python -m hos_scrcpy.gui.app` | 模块化，带 UI 层级树，适合日常使用 |
+| Demo App | `python -m demo.app` | 单文件，读代码学流程 |
+| GUI App | `python -m hos_scrcpy.gui.app` | 模块化，带 UI 树面板和 XPath 搜索 |
 
-Demo App (`demo/app.py`) 是单文件实现，所有逻辑内聚，方便理解整个投屏流程。
-GUI App (`hos_scrcpy/gui/app.py`) 使用项目模块化结构，额外提供 UI 层级树查看、XPath 搜索功能。
+Demo App (`demo/app.py`) 所有逻辑在一个文件里，方便理解。GUI App 多一个 UI 树浏览器。
 
 ```python
 with HOSDevice.connect("SN123456") as dev:
@@ -247,9 +222,9 @@ with HOSDevice.connect("SN123456") as dev:
 
 ---
 
-## 5. WiFi 无线调试
+## WiFi 无线调试
 
-类似 ADB 的 `adb tcpip` + `adb connect`。
+类似 `adb tcpip` + `adb connect`。
 
 ```python
 # Step 1: USB 模式下开启 WiFi 调试（设备会重启）
@@ -282,58 +257,50 @@ hdc tconn 192.168.1.100:8710 -remove
 
 ---
 
-## 6. 视频流
+## 视频流
 
-### 6.1 Java StreamBridge Raw H.264 模式（推荐，默认）
+### gRPC Raw H.264（默认推荐）
 
-Java 端直通原始 H.264 Annex B NAL 单元，Python 端 PyAV 软解码。
-帧率 ~30fps，延迟低。
+设备端 scrcpy 扩展直出 H.264 数据块（Annex B 流，无长度前缀），消费方 PyAV 软解码。~20fps，纯 Python 无 Java。
 
 ```python
 capture = dev.screen
 
 # Raw H.264 模式（默认），需 pip install av
-touch = capture.start_java_stream(on_frame, raw_mode=True)
+touch = capture.start_grpc_stream(on_frame, raw_mode=True)
 
-def on_frame(nal_bytes: bytes):
-    """每帧回调，nal_bytes 是原始 H.264 Annex B 数据"""
+def on_frame(chunk: bytes):
+    """每块回调，chunk 是原始 H.264 数据（连续拼接，按 NAL start code 切分）"""
     # 自行用 PyAV 解码
     import av
     ctx = av.CodecContext.create("h264", "r")
     ...
 ```
 
-**启动流程**：
-1. `_restart_hdc(hdc_path, sn, ip, port)` — `rm -f` 清理设备端残留库，`fport rm` 清理转发
-2. `_cleanup_stale_procs(sn)` — 杀同设备残留 Java 进程
-3. `_push_scrcpy_library(sn, ip, port, hdc_path)` — 预推 scrcpy 库到设备
-4. `subprocess.Popen(java StreamBridge)` — 启动 Java 子进程
-5. 等待 Java `READY` 信号（最多 35s 超时）
-6. 返回 `FastTouchController(java_proc)` 用于低延迟触控
+**启动流程**（`HosStreamBridge.start()`，全部纯 Python）：
+1. `uitest --version` 读取设备 uitest 版本，判定 fport 转发目标（>6.0.2.1 → `localabstract:scrcpy_grpc_socket`，老版本 → `tcp:5000`）
+2. 触控通道：按 uitest 版本选 agent so（五件映射），md5/版本核对推送 `/data/local/tmp/agent.so`，确保系统 uitest 守护进程在跑，fport 转发 + 连 JSON socket
+3. 视频通道：md5 核对推送 `libscreen_casting.z.so`（不一致才推），杀残留扩展守护进程后带流参数重起（`-scale 1 -frameRate 20 -bitRate 2000000 -p 5000 ...`）
+4. gRPC 明文连本机转发口，`ScrcpyService/onStart(Empty)` 服务端流；接收线程逐消息取 `payload["data"].val_bytes` 入有界队列（满丢最旧）
+5. 唤屏（`power-shell wakeup`）+ `onRequestIDRFrame` 催帧，等首块（最多 15s）
+6. 返回 `FastTouchController` 用于低延迟触控
 
-**Java 端处理**：
-- 创建 `HosRemoteDevice` 后调用 `device.executeShellCommand("rm -f ...")` 清理旧库
-- `HosRemoteDevice.startCaptureScreen(callback)` 启动视频流
-- `onReady` 后调用 `requestIDRFrame()` 强制输出 SPS+PPS+IDR
-- stdout 直通：`[4字节大端长度][原始 H.264 Annex B 数据]`，每帧 `flush()`
-- stdin 接收触控：`D:x:y` / `M:x:y` / `U:x:y`
-- `startTouchReader` 检测 stdin EOF → Python 退出时自动终止 Java 进程
+**停滞看门狗**（`read_frames` 内置）：
+- 5s 无数据 → IDR 探活 + 唤屏（兼防灭屏）
+- 60s 持续无数据 → 判死退出流（消费方按流结束处理）
 
 **SPS/PPS 处理**：
-- SDK 第一帧通常为 31 字节纯 SPS+PPS（Annex B `00 00 00 01 67 / 68`）
+- 首块通常含 SPS+PPS（Annex B `00 00 00 01 67 / 68`）
 - 库只透传原始字节，SPS/PPS 检测由调用方处理
 
-**帧数据完整性**：
-- 每个 `onData` 回调携带完整视频帧（已验证：NAL 类型一致，Annex B 起始码完整）
-- 帧大小 20KB~140KB（取决于画面复杂度），无需拼接
+**码率参数**：`-bitRate` 单位是字节/秒，直接传 `2_000_000`（闭源 SDK 曾因单位是 MB 导致 int 溢出的坑，自研后不存在）
 
-### 6.2 JPEG 兼容模式（无需 PyAV）
+### JPEG 模式（本库内解码）
 
-Java 端 FFmpeg 完成 H.264 解码 + JPEG 编码，Python 端直接显示 JPEG。
-帧率较低（~15fps），但无需 Python 端解码。
+`raw_mode=False` 时本库用 PyAV 把 H.264 块解码成 JPEG 再回调。方便落盘/网络转发。
 
 ```python
-touch = capture.start_java_stream(on_frame, raw_mode=False)
+touch = capture.start_grpc_stream(on_frame, raw_mode=False)
 
 def on_frame(jpeg_bytes: bytes):
     """每帧回调，jpeg_bytes 是完整 JPEG 数据"""
@@ -341,38 +308,38 @@ def on_frame(jpeg_bytes: bytes):
         f.write(jpeg_bytes)
 ```
 
-### 6.3 H.264 screenrecord（需 PyAV）
+### H.264 screenrecord（需 PyAV）
 
 ```python
 capture.start_native_stream(on_frame)
 ```
 
-通过 `hdc shell screenrecord --output-format=h264 -` 管道输出 H.264 裸流。
+通过 `hdc shell screenrecord --output-format=h264 -` 管道输出 H.264 裸流。部分设备不可用。
 
-### 6.4 截图轮询（纯 Python，~2fps）
+### 截图轮询（纯 Python，~2fps）
 
 ```python
 capture.start_screenshot_stream(on_frame, interval=0.5)
 ```
 
-循环调用 `snapshot_display -f /tmp/screen.jpeg` → `file recv`。
+循环 `snapshot_display -f` → `file recv` → 读文件。零额外依赖。
 
-### 6.5 流模式选择建议
+### 流模式怎么选
 
 ```
-Java 可用？
- ├── 是 → start_java_stream(raw_mode=True)   ← 推荐（~30fps）
- │        └── 无 PyAV → raw_mode=False（~15fps JPEG）
- └── 否 → PyAV 可用？
+gRPC 通道可用？（设备已连、so 推送成功）
+ ├── 是 → start_grpc_stream(raw_mode=True)   ← 推荐（~20fps）
+ │        └── 需 PyAV；JPEG 需求 → raw_mode=False
+ └── 否（设备端扩展起不来）→ PyAV 可用？
            ├── 是 → start_native_stream()
            └── 否 → start_screenshot_stream()
 ```
 
 ---
 
-## 7. UI 自动化
+## UI 自动化
 
-### 7.1 uiautomator2 风格操作（推荐）
+### uiautomator2 风格（推荐）
 
 ```python
 # 一键点击
@@ -395,13 +362,13 @@ text = dev.get_text_by_id("title")
 info = dev.get_info_by_text("OK")      # 返回完整属性字典
 ```
 
-### 7.2 Dump UI 树
+### Dump UI 树
 
 ```python
 root = dev.dump_ui()  # 或 dev.ui.dump()
 ```
 
-### 7.3 高级查找
+### 高级查找
 
 ```python
 # 通过 dev.finder 进行多条件查找
@@ -409,7 +376,7 @@ results = dev.finder.find(type="Button", clickable=True, enabled=True)
 count = dev.finder.count(text="OK")
 ```
 
-### 7.4 链式选择器（原 API，更精确）
+### 链式选择器（更精确）
 
 ```python
 # 直接查找
@@ -435,9 +402,9 @@ matches = find_by_xpath(root, "//*[@clickable=true]")
 
 ---
 
-## 8. GUI Demo
+## GUI Demo
 
-两个 GUI 入口：
+两个入口：
 
 ```bash
 # Demo App（单文件，适合学习）
@@ -448,7 +415,7 @@ python -m demo.app --sn DEVICE_SN    # 直接连接指定设备
 python -m hos_scrcpy.gui.app
 ```
 
-### 8.1 Demo App 界面功能
+### Demo App 界面
 
 | 组件 | 功能 |
 |------|------|
@@ -458,17 +425,17 @@ python -m hos_scrcpy.gui.app
 | 投屏画布 | 实时显示设备画面，鼠标触控 |
 | 状态栏 | 连接状态、帧率统计 |
 
-### 8.2 Demo App 关键类
+### 关键类
 
 | 类 | 文件 | 职责 |
 |----|------|------|
 | `DemoApp(tk.Tk)` | `demo/app.py` | 主窗口，设备管理，线程调度 |
 | `MirrorCanvas(tk.Canvas)` | `demo/app.py` | 投屏画布，帧渲染，触控事件 |
 | `ScreenCapture` | `hos_scrcpy/screen/capture.py` | 统一流管理（3 种模式） |
-| `FastTouchController` | `hos_scrcpy/input/fast_touch.py` | Java stdin 协议触控 |
+| `FastTouchController` | `hos_scrcpy/input/fast_touch.py` | uitest socket 触控 |
 | `Device` | `hos_scrcpy/core/device.py` | 设备实体（SN、IP、截图等） |
 
-### 8.3 线程模型
+### 线程模型
 
 ```
 主线程 (tkinter)
@@ -480,7 +447,8 @@ python -m hos_scrcpy.gui.app
   ├── _stream_loop()    — read_frames() → _on_frame() 回调
   ├── _connect()        — 设备连接 + 在线检查
   ├── _scan()           — 设备扫描 (_refresh_devices)
-  └── touch-reader      — Java 端 stdin 触控读取
+  ├── grpc-recv         — gRPC 服务端流迭代 → 队列
+  └── touch-drain       — 持续排空触控通道回复
 
 线程安全：
   - _latest_frame: 后台写，主线程读
@@ -488,7 +456,7 @@ python -m hos_scrcpy.gui.app
   - tkinter widget: 仅主线程通过 self.after() 操作
 ```
 
-### 8.4 GUI App 额外功能
+### GUI App 额外功能
 
 | 功能 | 说明 |
 |------|------|
@@ -499,7 +467,7 @@ python -m hos_scrcpy.gui.app
 
 ---
 
-## 9. WebSocket 服务器
+## WebSocket 服务器
 
 ```bash
 python -m hos_scrcpy.server.ws_server --sn SN123456 --port 8765
@@ -512,9 +480,9 @@ python -m hos_scrcpy.server.ws_server --sn SN123456 --port 8765
 
 ---
 
-## 10. 配置
+## 配置
 
-### 10.1 持久化配置
+### 持久化配置
 
 配置文件位置：`~/.hos-scrcpy/config.json`
 
@@ -534,56 +502,37 @@ add_remote_ip("192.168.1.101:8710")
 set_use_video_stream(True)
 ```
 
-### 10.2 Java StreamBridge 配置
+### so 资产（设备端组件）
 
-| 环境变量 | 用途 | 默认值 |
-|----------|------|--------|
-| `JAVA_HOME` | JDK/JRE 安装目录 | — |
-| `HOS_SCRCPY_JAVA` | Java 可执行文件路径 | — |
-| `HOS_SCRCPY_HOME` | HOScrcpy 安装根目录 | — |
-| `HOS_SCRCPY_LIBS` | JAR 库目录（直接路径） | `$HOS_SCRCPY_HOME/HOScrcpy/libs` |
+视频和触控需要的设备端 so 随包内置在 `hos_scrcpy/bridge/scrcpy_server/`，首次连接时自动核对（md5/版本标记）并推送到设备：
 
-**Java 搜索顺序**：
-1. `$JAVA_HOME/bin/java`（或 `.exe`）
-2. `$HOS_SCRCPY_JAVA`
-3. 系统 `PATH` 中的 `java`
-4. Windows 常见 JDK 安装目录（`C:\Program Files\Microsoft\`, `Eclipse Adoptium`, `Java`, `Android\openjdk`）
+| 文件 | 用途 | 设备端落点 |
+|------|------|-----------|
+| `libscrcpy_server_unix_6.5-20260313.z.so` | 视频扩展库（H.264 gRPC 服务端） | `/data/local/tmp/libscreen_casting.z.so` |
+| `uitest_agent_1.1.3.so` / `1.1.5.so` / `1.1.12.so` / `1.2.3.so` / `x86_1.1.12.so` | 触控 agent（按设备 uitest 版本五选一） | `/data/local/tmp/agent.so` |
 
-**JAR 库搜索顺序**：
-1. `$HOS_SCRCPY_LIBS`
-2. `$HOS_SCRCPY_HOME/HOScrcpy/libs`
-3. 包内 `hos_scrcpy/bridge/libs/`
-4. 开发模式回退：`HOScrcpy-main/HOScrcpy/libs/`
-5. 当前目录 `./libs/`
+需要刷新资产时（上游出了新 jar）：
 
-**StreamBridge 启动命令**（自动构建）：
 ```bash
-java -cp "libs/*;bridge_dir" StreamBridge <sn> <ip> <hdc_port> <hdc_path>
+python -m hos_scrcpy.bridge.extract_servers   # 从 hosScrcpy jar 重新提取
 ```
 
-**HosRemoteConfig 参数**（`StreamBridge.java` 内设置）：
+流参数（`native_stream.py` 顶部常量）：`STREAM_SCALE=1`、`STREAM_FRAME_RATE=20`、`STREAM_BIT_RATE=2_000_000`（字节/秒）、`STREAM_IFRAME_INTERVAL_MS=2000`、`STREAM_REPEAT_INTERVAL=33`。
 
-| 参数 | 值 | 说明 |
-|------|-----|------|
-| `setImageScaleSize` | 720 | 短边缩放到 720px |
-| `setFrameRate` | 30 | 目标帧率 |
-| `setBitRate` | 4000000 | 4 Mbps 码率 |
-
-### 10.3 进程生命周期
+### 通道生命周期
 
 ```
 启动时:
-  _restart_hdc()        清理 hdc 端口转发 + 设备端 screen_casting 进程 + 残留 so 文件
-  _cleanup_stale_procs() 杀同设备的残留 Java StreamBridge 进程
-  _push_scrcpy_library() 预推备用 scrcpy 库到设备（可选，跳过则 SDK 自动处理）
-  subprocess.Popen()    启动 Java 子进程
-  注册 atexit 清理      确保进程退出时 Java 子进程被终止
+  HosTouchChannel.start()  推 agent.so → 起/复用系统 uitest 守护进程 → fport → JSON socket
+  HosVideoStream.start()   推 libscreen_casting.z.so → 起扩展守护进程 → fport → gRPC 收流
+                           （首块等待：唤屏 + IDR 催帧，最多 15s）
+  接收/排空线程           grpc-recv 迭代服务端流；touch-drain 排空回复
 
 断开时:
   ScreenCapture.stop()
-    ├── _kill_proc_tree(java_proc)  递归杀 Java 进程树
-    ├── _unregister_proc()          从全局追踪列表移除
-    └── 线程 join(3s)               等待流线程退出
+    ├── HosVideoStream.stop()  cancel 流 → 关 channel → fport rm → 杀扩展守护进程
+    ├── HosTouchChannel.stop() 关 socket → fport rm（系统守护进程留着，dumpLayout 共用）
+    └── 线程 join(3s)          等待流线程退出
 
 复连时:
   _connect_device()
@@ -594,7 +543,7 @@ java -cp "libs/*;bridge_dir" StreamBridge <sn> <ip> <hdc_port> <hdc_path>
 
 ---
 
-## 11. 项目结构
+## 项目结构
 
 ```
 hos_scrcpy/
@@ -606,7 +555,7 @@ hos_scrcpy/
 ├── input/               # 输入控制
 │   ├── touch.py         # TouchController (uinput shell)
 │   ├── async_touch.py   # AsyncTouchController (非阻塞队列)
-│   ├── fast_touch.py    # FastTouchController (Java stdin 协议)
+│   ├── fast_touch.py    # FastTouchController (uitest socket)
 │   ├── mouse.py         # MouseController
 │   ├── keyboard.py      # KeyboardController
 │   └── keycode.py       # KeyCode 键码表
@@ -617,8 +566,11 @@ hos_scrcpy/
 │   ├── selector.py      # UIHierarchy + UiSelector
 │   └── xpath.py         # XPath 引擎
 ├── bridge/
-│   ├── native_stream.py # Java 子进程管理
-│   └── StreamBridge.java
+│   ├── native_stream.py # 纯 Python 双通道客户端（gRPC 视频 + uitest JSON 触控）
+│   ├── scrcpy.proto     # 设备端 gRPC 协议
+│   ├── scrcpy_pb2*.py   # protoc 生成代码
+│   ├── extract_servers.py # so 资产维护工具
+│   └── scrcpy_server/   # 设备端 so 资产
 ├── server/
 │   └── ws_server.py     # WebSocket 服务器
 ├── gui/
@@ -633,9 +585,9 @@ hos_scrcpy/
 
 ---
 
-## 12. 常见问题
+## 常见问题
 
-### 截图/触摸不工作？
+### 截图或触摸不工作
 
 检查 hdc 是否可用：
 ```python
@@ -643,52 +595,21 @@ from hos_scrcpy.core.hdc_client import HdcClient
 print(HdcClient.is_available())
 ```
 
-### Java 流启动失败？
+### gRPC 流启动失败
 
-1. 检查 Java 是否安装：`java -version`
-2. 检查 JAR 文件是否存在（需在 `HOScrcpy-main/HOScrcpy/libs/` 目录）
-3. 如 Java 不可用，自动回退截图模式
+1. 检查设备是否在线：`hdc list targets`
+2. 检查 so 资产是否齐全（`hos_scrcpy/bridge/scrcpy_server/`，缺了跑 `python -m hos_scrcpy.bridge.extract_servers`）
+3. 看日志里哪一步抛错：推库 / 起守护进程 / fport / gRPC 连接，各有明确报错
+4. 通道起不来时 ws_server 等消费方会自动回退截图模式
 
-### 画面延迟高？
+### 画面延迟高
 
-- 优先使用 Java StreamBridge（低延迟）
-- WiFi 连接比 USB 延迟高 50-100ms
+- gRPC 模式延迟最低；WiFi 连接比 USB 延迟高 50-100ms
 - 截图轮询模式下延迟约 500ms
 
-## 投屏架构对比
+### 多设备切换残留
 
-项目提供了三种投屏 Demo，架构不同适用场景不同：
-
-### 1. GUI Demo（Python tkinter）
-```
-python -m hos_scrcpy.gui.app
-```
-- **架构**: Java H.264 raw → PyAV 软解码 → PIL Image → tkinter Canvas
-- **特点**: 纯 Python UI，适合桌面控制、自动化测试集成
-- **依赖**: PyAV (`pip install av`)
-- **帧率**: ~50fps
-
-### 2. Python WebSocket 服务器
-```
-python -m hos_scrcpy.server.ws_server --port 8765
-```
-- **架构**: Java JPEG → stdout → Python → WebSocket → 浏览器 `<img>`
-- **特点**: 远程访问，设备控制和投屏在浏览器中完成
-- **依赖**: 无需 PyAV（JPEG 模式）
-- **帧率**: ~40fps
-
-### 3. Java WebSocket Demo（官方）
-位于 `HOScrcpy-main/HOScrcpy-main/web_demo/`
-- **架构**: Java SDK → ByteBuffer → WebSocket → 浏览器 JMuxer.js + `<video>` GPU 硬解
-- **特点**: 零中间环节，最低延迟/最高帧率
-- **帧率**: 60fps
-
-### 多设备切换 Java 进程残留？
-
-v0.2.0+ 已修复进程生命周期管理：
-- 切换设备时只清理当前设备的残留进程，不影响其他设备
-- `hdc kill` 已移除，改为精确清理转发规则
-- 线程使用 generation ID 防止竞态
+线程用 generation ID 防竞态；fport 转发按随机本机口隔离，停止时逐条 `fport rm` 清理。
 
 ```python
 # 安全的多设备切换
@@ -699,7 +620,7 @@ with dev1:
 
 dev2 = HOSDevice.connect("SN_DEVICE_2")
 with dev2:
-    dev2.screen.start_java_stream(on_frame)
+    dev2.screen.start_grpc_stream(on_frame)
 # dev2 自动清理，不会影响 dev1
 ```
 

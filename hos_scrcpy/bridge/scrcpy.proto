@@ -1,0 +1,40 @@
+// 鸿蒙设备端投屏服务的 gRPC 协议定义（阶段 142 自研客户端）。
+//
+// 来源：对 hosScrcpy jar（1.0.15/1.0.18）反编译提取的 protobuf 描述符逐字段
+// 复刻（Scrcpy.a() FileDescriptor 反射导出，字段编号/类型/map 结构一一对应，
+// 线格式兼容）。设备端实现是 uitest 守护进程加载的 libscreen_casting.z.so
+// 扩展（华为 DevEco/Hypium 工具链同源组件），与本协议互操作。
+//
+// 服务无 package 前缀（方法全名 "ScrcpyService/onStart"，与 jar 内一致）。
+syntax = "proto3";
+
+// 视频流：onStart(Empty) 服务端流；每条消息 payload["data"].val_bytes 为
+// 一段裸 H.264 数据（无长度前缀，连续拼接按 NAL start code 切分解码）。
+service ScrcpyService {
+  rpc onStart(Empty) returns (stream ReplyMessage);
+  rpc onEnd(Empty) returns (ReplyEndMessage);
+  // 强制编码器立即输出一个 IDR 帧——兼作流停滞探活（有响应=链路活着）
+  rpc onRequestIDRFrame(Empty) returns (ReplyEndMessage);
+}
+
+message Empty {}
+
+message ReplyMessage {
+  string data = 1;
+  int32 reply_type = 2;
+  map<string, ParamValue> payload = 3;
+}
+
+// 六合一变体：按字段类型取值；视频帧走 val_bytes
+message ParamValue {
+  int64 val_int = 1;
+  double val_double = 2;
+  string val_string = 3;
+  bool val_bool = 4;
+  bytes val_bytes = 5;
+  float val_float = 6;
+}
+
+message ReplyEndMessage {
+  int32 result = 1;
+}

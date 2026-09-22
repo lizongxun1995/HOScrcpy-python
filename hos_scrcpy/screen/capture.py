@@ -3,11 +3,12 @@
 Supports three modes:
 1. Screenshot polling (pure Python): periodically calls snapshot_display + file recv.
 2. Native H.264 stream (hdc screenrecord, needs PyAV): pipes raw H.264 via hdc shell.
-3. Java StreamBridge (IMAGE mode): low-latency JPEG frames via Java subprocess + touch relay.
+3. gRPC stream (pure Python, needs grpcio): low-latency H.264 via the device-side
+   scrcpy extension + uitest JSON touch relay. The former Java StreamBridge mode.
 
 Usage:
     cap = ScreenCapture(device)
-    cap.start_java_stream(on_frame=lambda jpeg_bytes: ...)
+    cap.start_grpc_stream(on_frame=lambda chunk: ...)
     cap.stop()
 """
 
@@ -27,7 +28,7 @@ class ScreenCapture:
         self._running = False
         self._thread: threading.Thread | None = None
         self._proc = None
-        self._stop_event: threading.Event = threading.Event()
+        self._bridge = None  # HosStreamBridge (gRPC mode)
         self._stop_event: threading.Event = threading.Event()
         self._stream_gen: int = 0  # generation counter to prevent stale-thread cleanup races
     # ---- screenshot polling mode ----
@@ -174,7 +175,7 @@ class ScreenCapture:
                 pass
 
         try:
-            self._decode_h264_stream(proc, on_frame)
+            self._decode_h264_chunks(self._proc_chunks(proc), on_frame)
         except Exception as ex:
             logger.error(f"{TAG}: H.264 decode error: {ex}")
             if on_error:
@@ -182,18 +183,10 @@ class ScreenCapture:
         finally:
             _kill_proc_tree(proc)
 
-    def _decode_h264_stream(self, proc, on_frame):
-        try:
-            import av
-        except ImportError:
-            logger.warning(f"{TAG}: PyAV not installed, falling back to screenshots")
-            _kill_proc_tree(proc)
-            raise RuntimeError("PyAV required for native stream: pip install av")
-
-        codec = av.CodecContext.create("h264", "r")
-        buf = b""
-
-        while self._running and not self._stop_event.is_set() and proc.poll() is None:
+    @staticmethod
+    def _proc_chunks(proc):
+        """Yield stdout chunks from a subprocess while it is alive."""
+        while proc.poll() is None:
             try:
                 chunk = proc.stdout.read(8192)
                 if not chunk:
@@ -201,6 +194,26 @@ class ScreenCapture:
                     continue
             except Exception:
                 break
+            yield chunk
+
+    def _decode_h264_chunks(self, chunks, on_frame):
+        """Decode a raw H.264 chunk stream into JPEG frames (needs PyAV).
+
+        chunks: iterable of bytes (subprocess stdout pieces, gRPC chunks, ...).
+        """
+        try:
+            import av
+        except ImportError:
+            raise RuntimeError("PyAV required for H.264 decoding: pip install av")
+
+        codec = av.CodecContext.create("h264", "r")
+        buf = b""
+
+        for chunk in chunks:
+            if not self._running or self._stop_event.is_set():
+                return
+            if not chunk:
+                continue
 
             buf += chunk
 
@@ -256,30 +269,37 @@ class ScreenCapture:
             on_ready()
         self._screenshot_loop(on_frame, interval=0.5)
 
-    # ---- Java StreamBridge mode ----
+    # ---- gRPC stream mode (pure Python, replaces the Java StreamBridge) ----
 
 
-    def start_java_stream(self, on_frame, wait_ready: bool = False,
+    def start_grpc_stream(self, on_frame, wait_ready: bool = True,
                           raw_mode: bool = True):
-        """Start low-latency JPEG or raw H.264 stream via Java StreamBridge.
+        """Start low-latency stream via the pure-Python gRPC bridge.
+
+        No Java/JAR involved: video comes from the device-side scrcpy extension
+        over gRPC; touch goes through the uitest JSON socket.
 
         Args:
             on_frame: Callback(frame_bytes) for each frame.
-            wait_ready: If True, blocks until Java READY signal (up to 35s).
-            raw_mode: If True, use --raw mode (raw H.264, requires PyAV).
-                      If False, use JPEG mode (Java-side decode, no PyAV needed).
+            wait_ready: If True, blocks until the first video chunk arrives
+                        (wake screen + IDR requests, up to 15s).
+            raw_mode: If True (default), on_frame receives raw H.264 chunks —
+                      the consumer decodes (e.g. PyAV). If False, frames are
+                      decoded here into JPEG (requires PyAV).
 
         Returns a FastTouchController for touch injection, or None on failure.
         """
-        # Automatically fall back to JPEG mode if PyAV is not installed
-        if raw_mode:
+        from hos_scrcpy.bridge.native_stream import start_native_bridge, read_frames
+        from hos_scrcpy.input.fast_touch import FastTouchController
+
+        # JPEG mode decodes in Python now (formerly Java-side) — bail out early
+        # so callers like the WS server can fall back to screenshot polling.
+        if not raw_mode:
             try:
                 import av  # noqa: F401
             except ImportError:
-                logger.warning(f"{TAG}: PyAV not installed, falling back to JPEG mode")
-                raw_mode = False
-        from hos_scrcpy.bridge.native_stream import start_native_bridge, read_frames as read_jpeg_frames
-        from hos_scrcpy.input.fast_touch import FastTouchController
+                logger.error(f"{TAG}: JPEG mode requires PyAV (pip install av)")
+                return None
 
         if self._running:
             self.stop()
@@ -290,34 +310,40 @@ class ScreenCapture:
         my_gen = self._stream_gen
 
         t_start = time.monotonic()
-        logger.info(f"{TAG}: start_java_stream begin sn={self._device.sn} raw_mode={raw_mode}")
-        java_proc = start_native_bridge(
+        logger.info(f"{TAG}: start_grpc_stream begin sn={self._device.sn} raw_mode={raw_mode}")
+        bridge = start_native_bridge(
             self._device.sn, self._device.ip, self._device.port,
-            wait_ready=wait_ready, raw_mode=raw_mode,
+            wait_ready=wait_ready,
         )
-        logger.info(f"{TAG}: start_java_stream bridge_ready took {(time.monotonic() - t_start)*1000:.0f}ms")
+        logger.info(f"{TAG}: start_grpc_stream bridge_ready took {(time.monotonic() - t_start)*1000:.0f}ms")
 
-        if java_proc is None:
+        if bridge is None:
             self._running = False
             return None
 
-        self._proc = java_proc
-        touch = FastTouchController(java_proc)
+        self._bridge = bridge
+        touch = FastTouchController(bridge.touch)
 
         def _stream_loop():
             try:
-                for jpeg in read_jpeg_frames(java_proc, stop_event=self._stop_event):
-                    if not self._running or self._stop_event.is_set():
-                        break
-                    on_frame(jpeg)
+                if raw_mode:
+                    for chunk in read_frames(bridge, stop_event=self._stop_event):
+                        if not self._running or self._stop_event.is_set():
+                            break
+                        on_frame(chunk)
+                else:
+                    # JPEG mode: decode the H.264 chunks here (formerly the
+                    # Java bridge's job)
+                    self._decode_h264_chunks(
+                        read_frames(bridge, stop_event=self._stop_event), on_frame)
             except Exception as ex:
-                logger.error(f"{TAG}: java stream error: {ex}")
+                logger.error(f"{TAG}: gRPC stream error: {ex}")
             finally:
                 # Only cleanup if we are still the current generation
                 if self._stream_gen == my_gen:
-                    self._proc = None
+                    self._bridge = None
                 try:
-                    _kill_proc_tree(java_proc)
+                    bridge.stop()
                 except Exception:
                     pass
 
@@ -325,7 +351,9 @@ class ScreenCapture:
         self._thread.start()
         return touch
 
-    # ---- lifecycle ----
+    # Deprecated alias — the stream is no longer backed by Java, but the old
+    # name is kept so existing callers keep working.
+    start_java_stream = start_grpc_stream
 
     # ---- lifecycle ----
 
@@ -341,11 +369,19 @@ class ScreenCapture:
         self._running = False
         self._stop_event.set()
 
-        # Unregister from global process list before killing
+        # Stop the gRPC bridge (video + touch channels, fport cleanup)
+        b = self._bridge
+        if b:
+            self._bridge = None
+            try:
+                b.stop()
+            except Exception:
+                pass
+
+        # Kill the screenrecord subprocess if that mode is active
         p = self._proc
         if p:
-            from hos_scrcpy.bridge.native_stream import _kill_proc_tree, _unregister_proc
-            _unregister_proc(p)
+            from hos_scrcpy.bridge.native_stream import _kill_proc_tree
             _kill_proc_tree(p)
             self._proc = None
 
@@ -353,7 +389,6 @@ class ScreenCapture:
         if join and self._thread and self._thread.is_alive():
             self._thread.join(timeout=3)
             self._thread = None
-        logger.info(f"{TAG}: capture stopped")
         logger.info(f"{TAG}: capture stopped")
 
     @property

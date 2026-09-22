@@ -1,8 +1,8 @@
 """hos_scrcpy — Python API for controlling HarmonyOS 6.0 devices.
 
-Provides a complete Python wrapper around the HOScrcpy Java library,
-exposing all original interfaces: touch, mouse, keyboard, screen capture,
-UI hierarchy dump, and device management.
+Pure-Python implementation (no Java/JAR): touch, mouse, keyboard, screen
+capture (gRPC H.264 streaming), UI hierarchy dump, and device management,
+all over the hdc command-line tool.
 
 Quick start:
     from hos_scrcpy import HOSDevice
@@ -44,11 +44,17 @@ from hos_scrcpy.core.device import Device
 from hos_scrcpy.core.hdc_client import HdcClient
 from hos_scrcpy.input.keycode import KeyCode, keycode_for_char
 from hos_scrcpy.input.touch import TouchController
+from hos_scrcpy.input.async_touch import AsyncTouchController
+from hos_scrcpy.input.fast_touch import FastTouchController
 from hos_scrcpy.input.mouse import MouseController
 from hos_scrcpy.input.keyboard import KeyboardController
 from hos_scrcpy.screen.capture import ScreenCapture
+from hos_scrcpy.bridge.native_stream import start_native_bridge, read_frames
 from hos_scrcpy.ui.hierarchy import JsonStructure
 from hos_scrcpy.ui.selector import UIHierarchy, UiSelector
+from hos_scrcpy.ui.finder import UIFinder
+from hos_scrcpy.ui.xpath import find_by_xpath, xpath_for, xpath_filter
+from hos_scrcpy.utils.bounds import parse_bounds, bounds_to_rectangle
 from hos_scrcpy.interfaces import (
     HOScrcpyError,
     DeviceOfflineError,

@@ -27,13 +27,14 @@ classifiers = [
 
 dependencies = [
     "Pillow>=10.0",
+    "grpcio>=1.60",
 ]
 
 [project.optional-dependencies]
-jpype = ["jpype1>=1.5.0"]
 av = ["av>=12.0"]
 server = ["websockets>=12.0"]
-all = ["hos-scrcpy[jpype,av,server]"]
+dev = ["grpcio-tools>=1.60"]
+all = ["hos-scrcpy[av,server]"]
 
 [project.scripts]
 hos-scrcpy = "hos_scrcpy.gui.app:main"
@@ -46,3 +47,5 @@ include = ["hos_scrcpy*"]
 
 [tool.setuptools.package-data]
 "hos_scrcpy.toolchains" = ["*"]
+"hos_scrcpy.bridge" = ["scrcpy.proto"]
+"hos_scrcpy.bridge.scrcpy_server" = ["*.so"]

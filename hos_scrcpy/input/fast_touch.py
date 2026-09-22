@@ -1,6 +1,8 @@
-"""FastTouchController — protocol-level touch via Java StreamBridge stdin.
+"""FastTouchController — low-latency touch via the uitest Gestures JSON socket.
 
 Down/up: sent immediately. Move: throttled to max 20/sec, skip tiny deltas.
+The socket channel's lifecycle is owned by the stream bridge (HosTouchChannel);
+this controller only writes Gestures events through it.
 """
 
 import time
@@ -11,37 +13,31 @@ TAG = "FastTouch"
 
 
 class FastTouchController(TouchProvider):
-    """Low-latency touch using StreamBridge stdin. Runs writes in daemon thread."""
+    """Low-latency touch over the persistent uitest socket channel."""
 
-    def __init__(self, java_proc):
-        self._stdin = java_proc.stdin if java_proc else None
-        self._dead = False
+    def __init__(self, touch_channel):
+        self._ch = touch_channel
         self._last_move_time = 0
         self._last_sent = (0, 0)
-        if self._stdin is None:
-            logger.warning(f"{TAG}: stdin is None — touch commands will be skipped")
-            self._dead = True
-        else:
-            logger.info(f"{TAG}: initialized, stdin={self._stdin}")
+        if touch_channel is None:
+            logger.warning(f"{TAG}: touch channel is None — touch commands will be skipped")
 
-    def _write(self, line):
-        if self._dead:
+    def _send(self, api, x, y):
+        if self._ch is None:
             return
         try:
-            self._stdin.write((line + "\n").encode())
-            self._stdin.flush()
-            logger.debug(f"{TAG}: sent {line}")
+            self._ch.send_touch(api, x, y)
         except Exception as ex:
-            logger.error(f"{TAG}: write error, marking dead: {ex}")
-            self._dead = True
+            # send_touch already swallows OSError; anything else is a bug — log it
+            logger.error(f"{TAG}: send {api} error: {ex}")
 
     def down(self, x, y, contact=0):
-        self._write(f"D:{x}:{y}")
+        self._send("touchDown", x, y)
         self._last_sent = (x, y)
         self._last_move_time = time.monotonic()
 
     def up(self, x, y, contact=0):
-        self._write(f"U:{x}:{y}")
+        self._send("touchUp", x, y)
 
     def move(self, x, y):
         now = time.monotonic()
@@ -51,7 +47,7 @@ class FastTouchController(TouchProvider):
         lx, ly = self._last_sent
         if abs(x - lx) < 10 and abs(y - ly) < 10:
             return
-        self._write(f"M:{x}:{y}")
+        self._send("touchMove", x, y)
         self._last_sent = (x, y)
         self._last_move_time = now
 
@@ -79,18 +75,5 @@ class FastTouchController(TouchProvider):
         self.up(x2, y2)
 
     def stop(self):
-        """Close stdin pipe and mark as dead."""
-        try:
-            self._dead = True
-            if self._stdin:
-                try:
-                    self._stdin.flush()
-                except Exception:
-                    pass
-                self._stdin.close()
-        except Exception:
-            pass
-
-    def __del__(self):
-        """Finalizer — ensure stdin is closed."""
-        self.stop()
+        """Detach from the channel. Channel teardown is owned by the bridge."""
+        self._ch = None

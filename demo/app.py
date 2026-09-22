@@ -148,6 +148,7 @@ class MirrorCanvas(tk.Canvas):
     def show_jpeg(self, jpeg_bytes: bytes) -> bool:
         """帧数据 → 显示。返回 True 表示实际渲染了画面。"""
         if self._render_busy:
+            self._diag_skip_busy = getattr(self, '_diag_skip_busy', 0) + 1
             return False
         self._render_busy = True
         try:
@@ -159,6 +160,7 @@ class MirrorCanvas(tk.Canvas):
             if len(jpeg_bytes) >= 4 and jpeg_bytes[:4] == b'\x00\x00\x00\x01':
                 img = self._feed_h264(jpeg_bytes)
                 if img is None:
+                    self._diag_skip_empty = getattr(self, '_diag_skip_empty', 0) + 1
                     return False
             else:
                 # 尝试 JPEG 解码（快速路径）
@@ -189,6 +191,7 @@ class MirrorCanvas(tk.Canvas):
                 )
             else:
                 self.itemconfig(self._img_id, image=self._photo)
+            self._diag_render_ok = getattr(self, '_diag_render_ok', 0) + 1
             return True
         except Exception as ex:
             print(f"[Demo] show_jpeg error: {ex}")
@@ -620,6 +623,12 @@ class DemoApp(tk.Tk):
             print(f"[Demo] first frame arrived at +{(self._first_frame_time - self._connect_start)*1000:.0f}ms")
         self._frames_recv += 1
         self._latest_frame = jpeg
+        # 诊断：每 100 帧打印渲染统计
+        if self._frames_recv % 100 == 0:
+            ok = getattr(self._mirror, '_diag_render_ok', 0)
+            busy = getattr(self._mirror, '_diag_skip_busy', 0)
+            empty = getattr(self._mirror, '_diag_skip_empty', 0)
+            print(f"[Demo] DIAG recv={self._frames_recv} render_ok={ok} skip_busy={busy} skip_empty={empty}")
         # 每帧立即解码渲染，确保解码器不漏帧（不丢帧=不花屏）
         if len(jpeg) >= 4 and jpeg[:4] == b'\x00\x00\x00\x01':
             self._mirror.show_jpeg(jpeg)

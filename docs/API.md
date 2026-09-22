@@ -1,10 +1,6 @@
-# HOScrcpy Python API 参考
+# API 参考
 
-> **资源管理**：使用 `with dev:` 上下文管理器或显式调用 `dev.stop()` 确保 Java 进程
-> 和屏幕流正确释放。`HOSDevice.__del__` 和 `ScreenCapture.__del__` 提供兜底清理，
-> 但不应依赖 GC。
-
-
+用 `with dev:` 管理资源，或者手动调 `dev.stop()`。别依赖 GC 兜底。
 
 ## 目录
 
@@ -22,7 +18,6 @@
 - [XPath 查找](#xpath-查找)
 - [WebSocket 服务器](#websocket-服务器)
 - [Settings（配置）](#settings)
-- [AsyncTouchController（异步触摸）](#asynctouchcontroller)
 - [UIFinder（uiautomator2 风格查找器）](#uifinder)
 - [坐标工具](#坐标工具)
 
@@ -139,7 +134,7 @@ Device.list_remote(["ip1","ip2"]) # → list[Device]
 
 ## TouchController
 
-基于 `uinput -M` shell 命令的触摸注入。
+走 `uinput -M` shell 命令注入触摸，每条命令一个 hdc 子进程，延迟 ~100ms。
 
 ```python
 touch = dev.touch
@@ -162,31 +157,35 @@ touch.swipe(100, 800, 100, 200, duration=0.5, steps=20)
 
 ## FastTouchController
 
-通过 Java StreamBridge stdin 的低延迟触摸（< 1ms）。
+通过设备端 uitest 守护进程的持久 socket 直发 Gestures JSON 触控命令。延迟 <1ms。move 限流 20 次/秒，位移 <10px 跳过。
 
 ```python
-from hos_scrcpy.bridge.native_stream import start_native_bridge
-from hos_scrcpy.input.fast_touch import FastTouchController
+from hos_scrcpy import ScreenCapture
 
-output_proc, java_proc = start_native_bridge(sn)
-touch = FastTouchController(java_proc)
+capture = ScreenCapture(device)
+touch = capture.start_grpc_stream(on_frame)   # 返回 FastTouchController 或 None
+# （旧名 start_java_stream 仍可用，是同一方法的别名）
 
-touch.down(x, y)          # 发送 D:x:y
-touch.move(x, y)          # 发送 M:x:y（最大 20/s，<10px 跳过）
-touch.up(x, y)            # 发送 U:x:y
+touch.down(x, y)          # touchDown Gestures 事件
+touch.move(x, y)          # touchMove（最大 20/s，<10px 跳过）
+touch.up(x, y)            # touchUp
 touch.click(x, y)
 touch.swipe(x1,y1, x2,y2, duration=0.3, steps=10)
 
-touch.stop()              # 释放资源
+touch.stop()              # 与通道解绑（通道生命周期由流桥管理）
 ```
 
-协议格式：`<op>:<x>:<y>\n`（通过 Java stdin）
+协议格式（compact JSON，经 `hdc fport` 转发的本机口直连设备端 uitest 守护进程）：
+
+```json
+{"module":"com.ohos.devicetest.hypiumApiHelper","method":"Gestures","params":{"api":"touchDown","args":{"x":544,"y":1953}}}
+```
 
 ---
 
 ## AsyncTouchController
 
-非阻塞触摸队列，适用于截图轮询模式的 GUI。
+非阻塞触摸队列。GUI 主线程调了就走，后台 daemon 线程逐个消费。截图轮询 GUI 用这个。
 
 ```python
 from hos_scrcpy.input.async_touch import AsyncTouchController
@@ -307,37 +306,38 @@ keycode_for_char('!')  # → -1（无映射，需用 input_text）
 
 ## ScreenCapture
 
-统一屏幕流管理。3 种模式按性能降序排列。
+统一流管理。按性能从高到低：gRPC H.264 → screenrecord H.264 → 截图轮询。
 
 ```python
 capture = dev.screen
 
-# 模式 1：Java StreamBridge IMAGE 流（推荐，~30-60fps）
-touch = capture.start_java_stream(on_frame)
-# → 返回 FastTouchController 或 None（Java 不可用）
+# 模式 1：gRPC 流（推荐，~20fps，纯 Python 无 Java）
+# raw_mode=True（默认）：on_frame 收裸 H.264 数据块，消费方解码（需 PyAV）
+touch = capture.start_grpc_stream(on_frame, raw_mode=True)
+# raw_mode=False：on_frame 收 JPEG（本库内 PyAV 解码，需 PyAV）
+touch = capture.start_grpc_stream(on_frame, raw_mode=False)
+# → 返回 FastTouchController 或 None（通道建立失败）
+# （旧名 start_java_stream 仍可用，是同一方法的别名）
 
-# 模式 2：H.264 screenrecord（~30fps，需 PyAV）
+# 模式 2：H.264 screenrecord（部分设备不可用，需 PyAV）
 capture.start_native_stream(on_frame)
 
 # 模式 3：截图轮询（~2fps，纯 Python）
 capture.start_screenshot_stream(on_frame, interval=0.5)
 
-# 回调签名
+# 回调签名（raw_mode=False / 模式 2 / 模式 3）
 def on_frame(jpeg_bytes: bytes):
     with open("frame.jpg", "wb") as f:
         f.write(jpeg_bytes)
 
-# 停止
+# 停止（收口视频/触控通道、fport 转发与设备端守护进程）
 capture.stop()
 
 # 状态
 capture.is_streaming  # → bool
 ```
 
-模式选择建议：
-1. Java 可用时用 `start_java_stream`（低延迟视频 + 低延迟触摸）
-2. Java 不可用但有 PyAV 时用 `start_native_stream`
-3. 都没有时用 `start_screenshot_stream`
+模式选择：gRPC 可用 → `start_grpc_stream`（自动推 so、起守护进程、fport 转发）；需要 PyAV；设备端扩展不可用 → `start_native_stream`；都没有 → `start_screenshot_stream`。
 
 ---
 
@@ -585,82 +585,6 @@ use_video = get_use_video_stream()  # → bool
 
 # 默认端口
 port = get_default_port()           # → "8710"
-```
-
----
-
-## UIFinder（uiautomator2 风格）
-
-便捷的元素查找、点击、等待接口，自动管理 UI dump 缓存。
-
-```python
-finder = dev.finder
-
-# 通用查找
-finder.find(type="Button", text="OK", clickable=True)     # → list[JsonStructure]
-finder.find(xpath="//Button[@clickable=true]")            # XPath 查找
-finder.find_first(text="OK")                              # → JsonStructure | None
-
-# 点击（操作前自动 dump）
-finder.click_by_text("OK")         # → bool
-finder.click_by_id("submit_btn")   # → bool
-finder.click_by_xpath("//Button[0]") # → bool
-finder.click_by_description("返回")  # → bool
-
-# 存在判断（操作前自动 dump）
-finder.exists_text("OK")           # → bool
-finder.exists_id("submit_btn")     # → bool
-finder.exists_xpath("//Button")    # → bool
-finder.exists_description("返回")  # → bool
-
-# 等待出现（每 500ms 重新 dump + 查找）
-finder.wait_text("OK", timeout=5)     # → JsonStructure | None
-finder.wait_id("submit_btn", timeout=3)
-finder.wait_xpath("//Button", timeout=5)
-
-# 获取属性
-finder.get_text_by_id("title")       # → str | None
-finder.get_text_by_xpath("//Text[0]") # → str | None
-finder.get_bounds_by_id("btn")       # → (x, y, w, h) | None
-finder.get_center_by_id("btn")       # → (cx, cy) | None
-finder.get_bounds_by_text("OK")      # → (x, y, w, h) | None
-finder.get_center_by_text("OK")      # → (cx, cy) | None
-
-# 获取完整信息
-finder.get_info_by_id("btn")         # → dict | None
-finder.get_info_by_text("OK")        # → dict | None
-finder.get_info_by_xpath("//Button") # → dict | None
-
-# 计数
-finder.count(text="OK")              # → int
-finder.count_id("btn")               # → int
-
-# 手动刷新 UI 树
-finder.dump()                        # → JsonStructure | None
-```
-
-返回的 info dict 结构：
-```python
-{
-    "type": "Button",
-    "text": "OK",
-    "id": "ok_button",
-    "key": "ok_button",
-    "description": "确认按钮",
-    "hint": "",
-    "bounds": (10, 20, 100, 50),
-    "center": (60, 45),
-    "clickable": True,
-    "scrollable": False,
-    "enabled": True,
-    "focused": False,
-    "visible": True,
-    "long_clickable": False,
-    "selected": False,
-    "bundle": "com.example.app",
-    "hierarchy": "ROOT10,0,1",
-    "z_index": "0",
-}
 ```
 
 ---
